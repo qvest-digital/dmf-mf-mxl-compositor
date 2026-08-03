@@ -1,0 +1,22 @@
+name: release-please
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: release-please
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # The PAT matters: a release published with the default GITHUB_TOKEN
+      # starts no further workflow, so build.yml would never see the release
+      # event and no version-tagged image would be pushed.
+      - uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: .github/release-please-config.json
+          manifest-file: .github/release-please-manifest.json
