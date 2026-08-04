@@ -10,7 +10,7 @@
 # tag the gateway and node agent serving the same domain were built from.
 # Moving it here alone breaks reads against them.
 # renovate: datasource=docker depName=ghcr.io/qvest-digital/go-mxl-builder
-ARG GO_MXL_TAG=1.0.0-rc.9
+ARG GO_MXL_TAG=1.0.0-rc.12
 
 # -- Stage 1: build the compositor binary ------------------------------------
 FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS build
