@@ -85,6 +85,12 @@ flow's width, and `channelPeakDb`, one level per source channel rather than
 only the published two, so which channels of a wide flow carry anything is
 answerable without playing each pair.
 
+`channelPeakDb` is an envelope, not the last chunk's peak: it rises to each new
+peak and falls at 30 dB/s. A chunk covers about 20 ms, so a caller polling any
+slower than that would otherwise see one short window per poll and miss the
+audio between them. Falling at a fixed rate also means a reader drawing a meter
+can carry the level between polls instead of holding it flat.
+
 An AUDIO flow may declare `audio/float32` and still not carry normalised PCM.
 Samples far above full scale are reported through `/status` and replaced with
 silence rather than published, so a transport-integrity pattern does not become
