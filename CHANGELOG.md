@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.5](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.4...v1.0.0-rc.5) (2026-08-09)
+
+
+### Bug Fixes
+
+* **audio-preview:** decay the meter envelope per sample ([#8](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/8)) ([bf73b27](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/bf73b270ece32325d53f7591a31ad0e73d72bdec))
+
 ## [1.0.0-rc.4](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.3...v1.0.0-rc.4) (2026-08-09)
 
 
