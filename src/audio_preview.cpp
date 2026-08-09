@@ -7,12 +7,21 @@
 // interleaves them into F32LE, encodes Opus and RTSP-publishes to mediamtx,
 // which then serves it like any other path (WebRTC/WHEP, HLS fallback).
 //
+// Two channels are published, whatever the flow is wide. Nothing downstream
+// carries more: opusenc tops out at eight channels, RTP Opus at two, and the
+// MPEG-TS HLS variant delivers no more than stereo either -- a wider flow fails
+// to negotiate outright rather than degrading. Which two is the caller's
+// choice, so every channel of a 12-channel flow is reachable a pair at a time,
+// and /status carries a level for each of them so the silent ones are visible
+// without listening to every pair in turn.
+//
 // On demand rather than always-on: a caller opens one flow at a time out of an
 // inventory that can hold any number of audio flows, so a process per flow
 // would not scale. The control API takes POST /start?flow=<uuid> and
 // DELETE /stop?flow=<uuid>, and serves up to MXL_MAX_SESSIONS at once.
 //
-//   POST   /start?flow=<uuid>  -> {"path":"preview-audio-<uuid>", ...}
+//   POST   /start?flow=<uuid>[&channels=<l>[,<r>]]
+//                             -> {"path":"preview-audio-<uuid>", ...}
 //   DELETE /stop?flow=<uuid>   -> {"stopped":"<uuid>"}
 //   GET    /status             -> sessions, samples pushed, per-channel peak
 //
@@ -45,6 +54,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -116,12 +126,25 @@ namespace
     constexpr int kOpenAttempts = 15;
     constexpr auto kOpenInterval = std::chrono::seconds{1};
 
+    // What gets published, independent of how wide the flow is. See the note at
+    // the top for why nothing downstream carries more.
+    constexpr std::uint32_t kOutChannels = 2;
+
     struct Session
     {
         std::string flowId;
         std::string path;
         std::thread worker;
         std::atomic<bool> stop{false};
+
+        // Which two source channels are published, zero-based. Written by
+        // /start and read by the worker on every chunk, so a caller can move to
+        // another pair without the pipeline being torn down: the caps stay at
+        // kOutChannels, only which samples are copied into them changes. The
+        // worker clamps them to the flow's width once it knows it, and stores
+        // the clamped value back so /status reports what is actually audible.
+        std::atomic<std::uint32_t> left{0};
+        std::atomic<std::uint32_t> right{1};
 
         // Written by the worker, read by /status. Coarse enough that relaxed
         // atomics are the right amount of synchronisation.
@@ -135,6 +158,11 @@ namespace
         std::atomic<bool> muted{false};
         std::mutex errMu;
         std::string error;
+        // One level per source channel, not just the published pair: the point
+        // of a wide flow is finding which channels carry anything. Sized by the
+        // worker once the flow is open, so a mutex rather than atomics.
+        std::mutex levelMu;
+        std::vector<int> chanPeakMilliDb;
 
         void setError(std::string e)
         {
@@ -146,6 +174,24 @@ namespace
         {
             std::lock_guard<std::mutex> lk{errMu};
             return error;
+        }
+
+        void setLevels(std::vector<float> const& peaks)
+        {
+            std::lock_guard<std::mutex> lk{levelMu};
+            chanPeakMilliDb.resize(peaks.size());
+            for (std::size_t c = 0; c < peaks.size(); ++c)
+            {
+                chanPeakMilliDb[c] = peaks[c] > 0.0F
+                    ? std::max(static_cast<int>(std::lround(2000.0 * std::log10(peaks[c]))), -12000)
+                    : -12000;
+            }
+        }
+
+        std::vector<int> getLevels()
+        {
+            std::lock_guard<std::mutex> lk{levelMu};
+            return chanPeakMilliDb;
         }
     };
 
@@ -162,16 +208,22 @@ namespace
     // same rule; the two have to stay in step.
     constexpr char const* kHlsPathSuffix = "-hls";
 
-    // Planar -> interleaved. Each channel owns its own ring buffer; stride is
-    // the byte distance between the same sample position in consecutive
-    // channels, and the two fragments cover a read that straddles the buffer's
-    // wraparound point. Returns the peak absolute sample seen, so liveness can
-    // be reported without a second pass over the data.
-    float interleave(mxlWrappedMultiBufferSlice const& slices, std::uint32_t channels,
-        std::vector<float>& out)
+    // Planar -> interleaved stereo. Each channel owns its own ring buffer;
+    // stride is the byte distance between the same sample position in
+    // consecutive channels, and the two fragments cover a read that straddles
+    // the buffer's wraparound point.
+    //
+    // Every channel is read even though two are published, because `peaks`
+    // covers the whole flow -- the pass is over the samples either way, and a
+    // level for a channel nobody selected is the only way to tell a silent
+    // channel from an unheard one. `out` carries the selected pair alone, in
+    // left-then-right order regardless of which is the lower index.
+    void select_pair(mxlWrappedMultiBufferSlice const& slices, std::uint32_t channels,
+        std::uint32_t left, std::uint32_t right, std::vector<float>& out,
+        std::vector<float>& peaks)
     {
         out.clear();
-        float peak = 0.0F;
+        peaks.assign(channels, 0.0F);
         for (auto const& fr : slices.base.fragments)
         {
             if (fr.pointer == nullptr || fr.size == 0) continue;
@@ -179,18 +231,22 @@ namespace
             std::size_t const n = fr.size / sizeof(float);
             for (std::size_t s = 0; s < n; ++s)
             {
+                float l = 0.0F;
+                float r = 0.0F;
                 for (std::uint32_t c = 0; c < channels; ++c)
                 {
                     float v = 0.0F;
                     // memcpy rather than a float* cast: the ring buffer carries
                     // no alignment guarantee for an arbitrary sample offset.
                     std::memcpy(&v, bytes + (c * slices.stride) + (s * sizeof(float)), sizeof(float));
-                    out.push_back(v);
-                    peak = std::max(peak, std::fabs(v));
+                    peaks[c] = std::max(peaks[c], std::fabs(v));
+                    if (c == left) l = v;
+                    if (c == right) r = v;
                 }
+                out.push_back(l);
+                out.push_back(r);
             }
         }
-        return peak;
     }
 
     // Two codecs from one reader, because the two ways a browser can play this
@@ -206,8 +262,6 @@ namespace
     // extra encoder per session and keeps the fallback working on clusters where
     // ICE never completes.
     //
-    // AAC is avenc_aac rather than voaacenc: voaacenc is limited to two channels
-    // and these flows carry up to eight.
     // rtspclientsink picks an AAC payloader by rank, and GStreamer ships two at
     // the same rank: rtpmp4apay (MP4A-LATM) and rtpmp4gpay (mpeg4-generic).
     // LATM wins by default, and mediamtx then accepts the track but its MPEG-TS
@@ -227,15 +281,21 @@ namespace
     }
 
     std::string pipeline_desc(std::string const& opusLocation, std::string const& aacLocation,
-        std::uint32_t rate, std::uint32_t channels)
+        std::uint32_t rate)
     {
         std::ostringstream os;
         // is-live + do-timestamp: the reader is paced by mxlSleepUntil against
         // the flow's own sample clock, so GStreamer timestamps arrivals rather
         // than us computing PTS from a sample counter that would drift off it.
+        //
+        // The channel count is the published one, not the flow's: the reader
+        // hands over a pair whatever it opened, so the caps never depend on how
+        // wide the flow is. Feeding the flow's own width in was what made a
+        // 12-channel flow fail with not-negotiated -- above eight channels
+        // there is no encoder to link to, and above two no channel mask either.
         os << "appsrc name=src is-live=true format=time do-timestamp=true"
               " caps=audio/x-raw,format=F32LE,layout=interleaved,rate="
-           << rate << ",channels=" << channels
+           << rate << ",channels=" << kOutChannels
            << " ! queue leaky=downstream max-size-buffers=32 max-size-bytes=0 max-size-time=0"
               " ! audioconvert ! audioresample"
         // Opus needs 48k; a 48k flow passes through audioresample untouched. AAC
@@ -330,7 +390,7 @@ namespace
             ses->flowId.c_str(), channels, rateHz, batch, chunk, ses->path.c_str());
 
         auto const opusLocation = g_rtspBase + ses->flowId;
-        auto const desc = pipeline_desc(opusLocation, opusLocation + kHlsPathSuffix, rateHz, channels);
+        auto const desc = pipeline_desc(opusLocation, opusLocation + kHlsPathSuffix, rateHz);
         GError* err = nullptr;
         GstElement* pipeline = ::gst_parse_launch(desc.c_str(), &err);
         if (pipeline == nullptr || err != nullptr)
@@ -375,7 +435,8 @@ namespace
         std::uint64_t index = rt.headIndex > (chunk + lag) ? rt.headIndex - chunk - lag : 0;
 
         std::vector<float> pcm;
-        pcm.reserve(static_cast<std::size_t>(chunk) * channels);
+        pcm.reserve(static_cast<std::size_t>(chunk) * kOutChannels);
+        std::vector<float> peaks;
         int emptyReads = 0;
         int implausible = 0;
         bool logged = false;
@@ -449,7 +510,28 @@ namespace
                     slices.base.fragments[0].size, slices.base.fragments[1].size);
             }
 
-            float peak = interleave(slices, channels, pcm);
+            // Re-read per chunk: /start can move the pair while this runs, and
+            // the caps do not change, so the switch costs one chunk of audio
+            // rather than a pipeline rebuild. Clamped here because /start
+            // answers before the flow is open and cannot know its width; the
+            // clamped value is stored back so /status reports what is audible.
+            auto const lastCh = channels - 1;
+            std::uint32_t left = ses->left.load(std::memory_order_relaxed);
+            std::uint32_t right = ses->right.load(std::memory_order_relaxed);
+            if (left > lastCh)
+            {
+                left = lastCh;
+                ses->left.store(left, std::memory_order_relaxed);
+            }
+            if (right > lastCh)
+            {
+                right = lastCh;
+                ses->right.store(right, std::memory_order_relaxed);
+            }
+
+            select_pair(slices, channels, left, right, pcm, peaks);
+            float peak = 0.0F;
+            for (std::size_t i = 0; i < pcm.size(); ++i) peak = std::max(peak, std::fabs(pcm[i]));
 
             // A flow can declare audio/float32 and still not carry normalised
             // PCM. Transport-integrity producers write an incrementing byte
@@ -458,11 +540,20 @@ namespace
             // So say what was found and send silence rather than the noise --
             // /status carries the verdict, and the reader keeps running so the
             // meters and timing stay honest instead of the overlay just hanging.
+            // Levels for every channel, before any muting: what the flow
+            // carries is the diagnostic, and it stays true whether or not the
+            // pair on its way out has been replaced with silence.
+            ses->setLevels(peaks);
+            float const flowPeak = peaks.empty() ? 0.0F : *std::max_element(peaks.begin(), peaks.end());
+
+            // Judged on the whole flow rather than the audible pair: the
+            // verdict is about the payload, and a ramp on a channel nobody
+            // selected is the same broken producer.
             if (!ses->muted.load(std::memory_order_relaxed))
             {
                 // Latch only after several consecutive chunks: one implausible
                 // read should not mute a genuinely loud flow.
-                if (peak > kMaxPlausibleSample)
+                if (flowPeak > kMaxPlausibleSample)
                 {
                     if (++implausible == 5)
                     {
@@ -472,7 +563,7 @@ namespace
                                       "looks like a synthetic test pattern");
                         g_printerr("[%s] payload is not normalised float PCM "
                                    "(peak %g); muting output\n",
-                            ses->flowId.c_str(), static_cast<double>(peak));
+                            ses->flowId.c_str(), static_cast<double>(flowPeak));
                     }
                 }
                 else
@@ -506,7 +597,7 @@ namespace
                 {
                     ::gst_buffer_unref(buf);
                 }
-                ses->samples.fetch_add(pcm.size() / channels, std::memory_order_relaxed);
+                ses->samples.fetch_add(pcm.size() / kOutChannels, std::memory_order_relaxed);
                 // 20*log10(peak), floored at -120 dBFS so silence is a number
                 // rather than -inf.
                 int const milliDb = peak > 0.0F
@@ -559,19 +650,54 @@ namespace
         return target.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
     }
 
-    std::string start_session(std::string const& flow, int& code)
+    // "channels=<l>[,<r>]", one-based, to the zero-based pair the worker reads.
+    // A single channel is published to both sides rather than rejected: soloing
+    // one channel of a wide flow is the same request with nothing to pair it
+    // with. Anything unparseable falls back to the first pair, which is what a
+    // caller that does not care about channels wants.
+    std::pair<std::uint32_t, std::uint32_t> parse_pair(std::string const& spec)
+    {
+        auto one_based = [](std::string const& s, std::uint32_t fallback) {
+            try
+            {
+                auto const n = std::stoul(s);
+                return n >= 1 ? static_cast<std::uint32_t>(n - 1) : fallback;
+            }
+            catch (...)
+            {
+                return fallback;
+            }
+        };
+        if (spec.empty()) return {0, 1};
+        auto const comma = spec.find(',');
+        if (comma == std::string::npos)
+        {
+            auto const only = one_based(spec, 0);
+            return {only, only};
+        }
+        auto const left = one_based(spec.substr(0, comma), 0);
+        return {left, one_based(spec.substr(comma + 1), left)};
+    }
+
+    std::string start_session(std::string const& flow, std::string const& channels, int& code)
     {
         if (!valid_uuid(flow))
         {
             code = 400;
             return R"({"error":"bad flow id"})";
         }
+        auto const [left, right] = parse_pair(channels);
         std::lock_guard<std::mutex> lk{g_mu};
         auto it = g_sessions.find(flow);
         if (it != g_sessions.end())
         {
             // Idempotent: a repeated /start must not tear down a session that
-            // is already publishing.
+            // is already publishing. It does move the pair, though -- the caps
+            // are the same two channels either way, so switching costs a chunk
+            // of audio rather than a reconnect, and the browser keeps playing
+            // the path it is already on.
+            it->second->left.store(left, std::memory_order_relaxed);
+            it->second->right.store(right, std::memory_order_relaxed);
             auto const err = it->second->getError();
             code = err.empty() ? 200 : 500;
             std::ostringstream os;
@@ -589,6 +715,8 @@ namespace
         auto ses = std::make_unique<Session>();
         ses->flowId = flow;
         ses->path = "preview-audio-" + flow;
+        ses->left.store(left, std::memory_order_relaxed);
+        ses->right.store(right, std::memory_order_relaxed);
         auto* raw = ses.get();
         ses->worker = std::thread{[raw] { run_session(raw); }};
         g_sessions.emplace(flow, std::move(ses));
@@ -638,7 +766,21 @@ namespace
                << R"(,"rate":)" << ses->rate.load(std::memory_order_relaxed)
                << R"(,"samples":)" << ses->samples.load(std::memory_order_relaxed)
                << R"(,"peakDb":)" << (ses->peakMilliDb.load(std::memory_order_relaxed) / 100.0)
-               << R"(,"muted":)" << (ses->muted.load(std::memory_order_relaxed) ? "true" : "false");
+               << R"(,"muted":)" << (ses->muted.load(std::memory_order_relaxed) ? "true" : "false")
+            // One-based, matching what /start takes, and post-clamp, so this is
+            // the pair actually going out rather than the one that was asked
+            // for.
+               << R"(,"selected":[)" << (ses->left.load(std::memory_order_relaxed) + 1) << ','
+               << (ses->right.load(std::memory_order_relaxed) + 1) << ']';
+            os << R"(,"channelPeakDb":[)";
+            bool firstLevel = true;
+            for (int const milliDb : ses->getLevels())
+            {
+                if (!firstLevel) os << ',';
+                firstLevel = false;
+                os << (milliDb / 100.0);
+            }
+            os << ']';
             if (!err.empty()) os << R"(,"error":")" << json_escape(err) << '"';
             os << '}';
         }
@@ -698,7 +840,8 @@ namespace
                 std::string target;
                 is >> method >> target;
                 if (method == "POST" && target.rfind("/start", 0) == 0)
-                    body = start_session(query_param(target, "flow"), code);
+                    body = start_session(query_param(target, "flow"),
+                        query_param(target, "channels"), code);
                 else if (method == "DELETE" && target.rfind("/stop", 0) == 0)
                     body = stop_session(query_param(target, "flow"), code);
                 else if (method == "GET" && target.rfind("/status", 0) == 0)
