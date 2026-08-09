@@ -120,6 +120,15 @@ namespace
     // audio never sustains it.
     constexpr float kMaxPlausibleSample = 4.0F;
 
+    // Meter fallback rate. A chunk's peak on its own is a ~20ms sample of the
+    // audio, and /status is read far less often than a chunk is read, so
+    // reporting it raw hands a caller one short window out of every poll
+    // interval and hides everything between: quiet where the audio was loud,
+    // and a value that jumps rather than moves. Decaying the reported level
+    // towards each new peak instead makes it an envelope of every sample read,
+    // which is what a level meter shows. Fast attack, this much fall.
+    constexpr double kLevelDecayDbPerSecond = 30.0;
+
     // Bounded, unlike the compositor's open-ended wait for a flow to appear:
     // that one blocks its pipeline forever when a flow never comes back, and a
     // preview must fail visibly instead of hanging the overlay.
@@ -437,6 +446,13 @@ namespace
         std::vector<float> pcm;
         pcm.reserve(static_cast<std::size_t>(chunk) * kOutChannels);
         std::vector<float> peaks;
+        // Per-channel meter envelope, and how much of it one chunk's worth of
+        // silence takes away. Held here rather than on the session because only
+        // this thread advances it; /status reads the published copy.
+        std::vector<float> envelope;
+        auto const chunkSeconds = static_cast<double>(chunk) / std::max<std::uint32_t>(rateHz, 1);
+        auto const chunkDecay =
+            static_cast<float>(std::pow(10.0, -kLevelDecayDbPerSecond * chunkSeconds / 20.0));
         int emptyReads = 0;
         int implausible = 0;
         bool logged = false;
@@ -543,7 +559,12 @@ namespace
             // Levels for every channel, before any muting: what the flow
             // carries is the diagnostic, and it stays true whether or not the
             // pair on its way out has been replaced with silence.
-            ses->setLevels(peaks);
+            envelope.resize(peaks.size(), 0.0F);
+            for (std::size_t c = 0; c < peaks.size(); ++c)
+            {
+                envelope[c] = std::max(peaks[c], envelope[c] * chunkDecay);
+            }
+            ses->setLevels(envelope);
             float const flowPeak = peaks.empty() ? 0.0F : *std::max_element(peaks.begin(), peaks.end());
 
             // Judged on the whole flow rather than the audible pair: the
