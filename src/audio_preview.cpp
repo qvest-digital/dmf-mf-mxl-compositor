@@ -446,13 +446,18 @@ namespace
         std::vector<float> pcm;
         pcm.reserve(static_cast<std::size_t>(chunk) * kOutChannels);
         std::vector<float> peaks;
-        // Per-channel meter envelope, and how much of it one chunk's worth of
+        // Per-channel meter envelope, and how much of it one sample's worth of
         // silence takes away. Held here rather than on the session because only
         // this thread advances it; /status reads the published copy.
+        //
+        // Per sample rather than per read: a read returns what the ring has,
+        // which is not reliably a chunk, and applying the fall once per read
+        // makes the rate a function of how the reader happened to batch rather
+        // than of the audio. Measured against a live 12-channel flow, per-read
+        // decay fell at 46 dB/s where 30 was declared.
         std::vector<float> envelope;
-        auto const chunkSeconds = static_cast<double>(chunk) / std::max<std::uint32_t>(rateHz, 1);
-        auto const chunkDecay =
-            static_cast<float>(std::pow(10.0, -kLevelDecayDbPerSecond * chunkSeconds / 20.0));
+        auto const decayPerSample =
+            std::pow(10.0, -kLevelDecayDbPerSecond / (20.0 * std::max<std::uint32_t>(rateHz, 1)));
         int emptyReads = 0;
         int implausible = 0;
         bool logged = false;
@@ -560,9 +565,11 @@ namespace
             // carries is the diagnostic, and it stays true whether or not the
             // pair on its way out has been replaced with silence.
             envelope.resize(peaks.size(), 0.0F);
+            auto const read = pcm.size() / kOutChannels;
+            auto const decay = static_cast<float>(std::pow(decayPerSample, static_cast<double>(read)));
             for (std::size_t c = 0; c < peaks.size(); ++c)
             {
-                envelope[c] = std::max(peaks[c], envelope[c] * chunkDecay);
+                envelope[c] = std::max(peaks[c], envelope[c] * decay);
             }
             ses->setLevels(envelope);
             float const flowPeak = peaks.empty() ? 0.0F : *std::max_element(peaks.begin(), peaks.end());
