@@ -49,10 +49,18 @@ Grid geometry is computed once the flow count is known: `cols = ceil(sqrt(n))`,
 
 ## mxl-audio-preview
 
-Reads an MXL AUDIO flow's per-channel sample buffers, interleaves them to
-F32LE, and publishes two RTSP paths per flow: Opus for WHEP and AAC for HLS,
+Reads an MXL AUDIO flow's per-channel sample buffers, interleaves two of them
+to F32LE, and publishes two RTSP paths per flow: Opus for WHEP and AAC for HLS,
 the latter suffixed `-hls`. Neither transport carries the other's codec, so
 both are published.
+
+The published stream is stereo whatever the flow's channel count: `opusenc`
+accepts at most eight channels, RTP Opus two, and the MPEG-TS HLS variant no
+more than stereo either. `channels` on `/start` picks which pair, one-based,
+so every channel of a wider flow is reachable a pair at a time; a single value
+publishes that channel to both sides. It defaults to the first pair. Repeating
+`/start` on a running session moves the pair without rebuilding the pipeline,
+so the switch does not interrupt a client already playing the path.
 
 Sessions are created on demand over a control API rather than one process per
 flow.
@@ -66,15 +74,22 @@ flow.
 | `MXL_OPUS_BITRATE` | `128000` | Opus bitrate |
 | `MXL_AAC_BITRATE` | `128000` | AAC bitrate |
 
-    POST   /start?flow=<uuid>    start a preview session
-    DELETE /stop?flow=<uuid>     stop it
-    GET    /status               sessions, levels and per-session verdicts
+    POST   /start?flow=<uuid>[&channels=<l>[,<r>]]
+                                 start a session, or move a running one's pair
+    DELETE /stop?flow=<uuid>      stop it
+    GET    /status                sessions, levels and per-session verdicts
     GET    /healthz
+
+`/status` carries `selected`, the pair on its way out after clamping to the
+flow's width, and `channelPeakDb`, one level per source channel rather than
+only the published two, so which channels of a wide flow carry anything is
+answerable without playing each pair.
 
 An AUDIO flow may declare `audio/float32` and still not carry normalised PCM.
 Samples far above full scale are reported through `/status` and replaced with
 silence rather than published, so a transport-integrity pattern does not become
-full-scale noise on the way out.
+full-scale noise on the way out. The verdict is taken over every channel, not
+only the selected pair.
 
 The publish target must already exist as a path on the RTSP server: this
 publishes into it, it does not create it.
