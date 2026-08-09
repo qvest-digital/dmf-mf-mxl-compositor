@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.3](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.2...v1.0.0-rc.3) (2026-08-09)
+
+
+### Features
+
+* **audio-preview:** publish a selectable stereo pair from any flow ([#4](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/4)) ([f62d463](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/f62d463c0b2465ae4ccd898415237920510a6319))
+
 ## [1.0.0-rc.2](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.1...v1.0.0-rc.2) (2026-08-04)
 
 
