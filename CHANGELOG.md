@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.4](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.3...v1.0.0-rc.4) (2026-08-09)
+
+
+### Bug Fixes
+
+* **audio-preview:** report a level a caller can meter ([#6](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/6)) ([42eb5b5](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/42eb5b5312d02fa372fa90c6b087e09e51bdddc1))
+
 ## [1.0.0-rc.3](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.2...v1.0.0-rc.3) (2026-08-09)
 
 
