@@ -68,6 +68,15 @@ type drives the version bump and the changelog section. Scope names the binary
 where one applies (`fix(audio-preview): ...`). Breaking changes take `!` or a
 `BREAKING CHANGE:` footer.
 
+Merging squashes, so the PR title is the subject that lands on main and the only
+one release-please reads: one changelog entry per squash, taken from that title.
+The body is GitHub's list of the branch's commit messages, and `!`,
+`BREAKING CHANGE:` and `Release-As:` are parsed only as footers at the bottom of
+the squashed message, so a footer written into an intermediate commit is inert.
+A PR carrying more than one release-relevant change is split, or carries a
+`BEGIN_COMMIT_OVERRIDE` block in its PR body, which release-please reads from
+the pull request over the API rather than from the commit.
+
 Explain why the change exists; the diff already shows what. No ticket numbers.
 No `Co-Authored-By` trailers. No checklists or "Summary" sections.
 
