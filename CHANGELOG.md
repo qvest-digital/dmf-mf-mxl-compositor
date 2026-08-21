@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.7](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.6...v1.0.0-rc.7) (2026-08-21)
+
+
+### Features
+
+* **encode:** cap the bitrate where the path to a viewer is narrow ([#14](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/14)) ([e5d19a3](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/e5d19a38c8ac694729b070738040050baa240587))
+
 ## [1.0.0-rc.6](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.5...v1.0.0-rc.6) (2026-08-21)
 
 
