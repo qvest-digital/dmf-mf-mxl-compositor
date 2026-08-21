@@ -634,14 +634,19 @@ int main(int argc, char** argv)
         //    sweet-spot for 720p30.
         //  - bitrate: 6000 kbps at the 720p baseline, scaled linearly
         //    with canvas area (bitrateKbps above).
-        //  - bframes=2: better compression efficiency at +1 frame of
-        //    encode latency (negligible vs HLS segment latency).
-        //  - profile=main: enables CABAC + B-frames vs baseline.
+        //  - bframes=0: WebRTC cannot carry them. mediamtx accepts the
+        //    stream, opens the peer connection, then closes it with
+        //    "WebRTC doesn't support H264 streams with B-frames" and the
+        //    viewer never sees a frame. HLS and SRT do not care either
+        //    way, and WHEP is how the showcase plays this out, so the
+        //    compression they would buy is not worth the delivery path.
+        //  - profile=main: CABAC. WebRTC carries it; only B-frames are
+        //    the problem, so the profile stays.
         //  - key-int-max=60: 2 s GOP at 30 fps -- matches our HLS
         //    segment cadence so I-frames align with segment boundaries.
         "! x264enc speed-preset=faster tune=zerolatency "
                   "bitrate=" + std::to_string(bitrateKbps) + " vbv-buf-capacity=2000 "
-                  "bframes=2 key-int-max=60 "
+                  "bframes=0 key-int-max=60 "
         "! video/x-h264,profile=main "
         // RTSP carries codec frames over RTP, not MPEG-TS. h264parse with
         // config-interval=-1 republishes SPS/PPS on every IDR so a viewer
