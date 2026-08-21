@@ -590,6 +590,17 @@ int main(int argc, char** argv)
     int bitrateKbps = static_cast<int>(
         6000LL * static_cast<long long>(OUT_W) * OUT_H / baseline);
     if (bitrateKbps < 6000) bitrateKbps = 6000;
+
+    // The fabric has the bandwidth, but the path to a viewer may not. Where a
+    // network refuses UDP, WebRTC media reaches a browser through a relay over
+    // TCP, and a relay forwards what that connection can carry and discards the
+    // rest. What arrives is then a fraction of every frame, so no frame ever
+    // completes: bytes accumulate at the viewer while the picture stays black.
+    //
+    // A cap is the cluster's to set, because it is a property of the delivery
+    // path rather than of the mosaic. Unset changes nothing.
+    int const capKbps = std::atoi(env_or("COMPOSITOR_MAX_BITRATE_KBPS", "0").c_str());
+    if (capKbps > 0 && bitrateKbps > capKbps) bitrateKbps = capKbps;
     g_grainBytes = v210GrainBytes(g_frameW, g_frameH);
     g_print("Grid: %zu flows -> %dx%d, tile %dx%d, out %dx%d, bitrate %dkbps, grainBytes %lld\n",
         flowIds.size(), g_cols, g_rows, TILE_W, TILE_H, OUT_W, OUT_H, bitrateKbps,
