@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.6](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.5...v1.0.0-rc.6) (2026-08-21)
+
+
+### Bug Fixes
+
+* **encode:** drop B-frames so WebRTC can carry the mosaic ([#12](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/12)) ([880bc5e](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/880bc5ec1c7b47fe7193ee8c55174bceb312f86b))
+
 ## [1.0.0-rc.5](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.4...v1.0.0-rc.5) (2026-08-09)
 
 
