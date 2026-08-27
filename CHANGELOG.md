@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.8](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.7...v1.0.0-rc.8) (2026-08-27)
+
+
+### Miscellaneous
+
+* drop the audio preview ([#16](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/16)) ([73229ce](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/73229ce5d688515b3fabdb0251cb6ff810b63bb4))
+
 ## [1.0.0-rc.7](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.6...v1.0.0-rc.7) (2026-08-21)
 
 
