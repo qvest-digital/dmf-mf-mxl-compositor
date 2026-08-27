@@ -61,7 +61,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /opt/mxl-compositor/bin/mxl-multi-compositor /usr/bin/
 # Companion entry point in the same image: the audio-flow preview publisher,
 # selected by overriding the container command. The compositor stays default.
-COPY --from=build /opt/mxl-compositor/bin/mxl-audio-preview /usr/bin/
 
 WORKDIR /home/mxl
 ENTRYPOINT ["/usr/bin/mxl-multi-compositor"]

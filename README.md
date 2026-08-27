@@ -4,12 +4,6 @@ MXL mosaic compositor, packaged as a DMF media function image. Reads MXL video
 flows zero-copy through libmxl, composites them into a single mosaic, encodes
 that once, and publishes it over RTSP.
 
-The image carries two entry points. The compositor is the default; the other is
-selected by overriding the container command.
-
-    /usr/bin/mxl-multi-compositor   mosaic compositor (ENTRYPOINT)
-    /usr/bin/mxl-audio-preview      audio flow -> RTSP, on demand
-
 Image: `ghcr.io/qvest-digital/dmf-mf-mxl-compositor`
 
 The chart that deploys this image lives in
@@ -46,60 +40,6 @@ Grid geometry is computed once the flow count is known: `cols = ceil(sqrt(n))`,
 `GET /stats.json` on `MXL_STATS_PORT` returns per-flow `fps`, `pushed`,
 `missed`, `mbps` and `live`, plus `cols`, `rows`, `outW`, `outH` and
 `grainBytes`. It is CORS-open.
-
-## mxl-audio-preview
-
-Reads an MXL AUDIO flow's per-channel sample buffers, interleaves two of them
-to F32LE, and publishes two RTSP paths per flow: Opus for WHEP and AAC for HLS,
-the latter suffixed `-hls`. Neither transport carries the other's codec, so
-both are published.
-
-The published stream is stereo whatever the flow's channel count: `opusenc`
-accepts at most eight channels, RTP Opus two, and the MPEG-TS HLS variant no
-more than stereo either. `channels` on `/start` picks which pair, one-based,
-so every channel of a wider flow is reachable a pair at a time; a single value
-publishes that channel to both sides. It defaults to the first pair. Repeating
-`/start` on a running session moves the pair without rebuilding the pipeline,
-so the switch does not interrupt a client already playing the path.
-
-Sessions are created on demand over a control API rather than one process per
-flow.
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `MXL_DOMAIN` | `/run/mxl/domain` | MXL domain directory to read from |
-| `MXL_PREVIEW_RTSP_BASE` | `rtsp://mediamtx:8554/preview-audio-` | Path prefix to publish into |
-| `MXL_CONTROL_PORT` | `8090` | Control API port |
-| `MXL_MAX_SESSIONS` | `4` | Concurrent previews before 429 |
-| `MXL_OPUS_BITRATE` | `128000` | Opus bitrate |
-| `MXL_AAC_BITRATE` | `128000` | AAC bitrate |
-
-    POST   /start?flow=<uuid>[&channels=<l>[,<r>]]
-                                 start a session, or move a running one's pair
-    DELETE /stop?flow=<uuid>      stop it
-    GET    /status                sessions, levels and per-session verdicts
-    GET    /healthz
-
-`/status` carries `selected`, the pair on its way out after clamping to the
-flow's width, and `channelPeakDb`, one level per source channel rather than
-only the published two, so which channels of a wide flow carry anything is
-answerable without playing each pair.
-
-`channelPeakDb` is an envelope, not the last chunk's peak: it rises to each new
-peak and falls at 30 dB/s. A chunk covers about 20 ms, so a caller polling any
-slower than that would otherwise see one short window per poll and miss the
-audio between them. Falling at a fixed rate also means a reader drawing a meter
-can carry the level between polls instead of holding it flat.
-
-An AUDIO flow may declare `audio/float32` and still not carry normalised PCM.
-Samples far above full scale are reported through `/status` and replaced with
-silence rather than published, so a transport-integrity pattern does not become
-full-scale noise on the way out. The verdict is taken over every channel, not
-only the selected pair.
-
-The publish target must already exist as a path on the RTSP server: this
-publishes into it, it does not create it.
-
 
 ## Building
 

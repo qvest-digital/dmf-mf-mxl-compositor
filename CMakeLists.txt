@@ -10,13 +10,7 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
 
 add_executable(mxl-multi-compositor src/main.cpp)
 
-# Audible previews of AUDIO flows, which mediamtx's mxlSource refuses. Same
-# image and same libmxl/GStreamer link line as the compositor -- it is the same
-# job (read MXL, encode, RTSP-publish) on the sample API instead of the grain
-# API, so it ships as a second entry point rather than a second image.
-add_executable(mxl-audio-preview src/audio_preview.cpp)
-
-foreach(target mxl-multi-compositor mxl-audio-preview)
+foreach(target mxl-multi-compositor)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   # mxl headers vendored under vendor/ -- runtime libmxl.so is provided by the
   # mxl-base image. No pkg-config entry available because mxl-base does not
@@ -25,5 +19,5 @@ foreach(target mxl-multi-compositor mxl-audio-preview)
   target_link_libraries(${target} PRIVATE PkgConfig::GST mxl pthread)
 endforeach()
 
-install(TARGETS mxl-multi-compositor mxl-audio-preview
+install(TARGETS mxl-multi-compositor
         RUNTIME DESTINATION bin)
