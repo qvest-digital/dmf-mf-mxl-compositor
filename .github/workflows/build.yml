@@ -80,6 +80,10 @@ jobs:
           build-args: NVNMOS_REF=${{ steps.ref.outputs.ref }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.ref.outputs.image }}
+          # Keeps the Conan dependency layer (nmos-cpp, Boost, OpenSSL) between
+          # runs, so rebuilding for a new NVNMOS_REF does not start from zero.
+          cache-from: type=gha,scope=nvnmos
+          cache-to: type=gha,scope=nvnmos,mode=max
           outputs: ${{ github.event_name == 'pull_request' && 'type=docker,dest=/tmp/nvnmos.tar' || '' }}
 
       - name: Hand the unpublished image on
