@@ -28,8 +28,9 @@ The encoded bitstream goes to `rtspclientsink`.
 | `MXL_FRAME_HEIGHT` | `1080` | Tile height, must match the flow definition |
 | `MXL_GRID_COLS` | derived | Column count override |
 | `MXL_STATS_PORT` | `9090` | Port for the `/stats.json` server |
+| `MXL_TILES` | flow count | Tile count; tiles beyond `MXL_FLOW_IDS` start empty |
 
-Empty `MXL_FLOW_IDS` exits non-zero. Opening a reader retries indefinitely
+No tiles -- neither `MXL_FLOW_IDS` nor `MXL_TILES` -- exits non-zero. Opening a reader retries indefinitely
 rather than exiting, so a flow that is not yet present does not turn into a
 crash loop.
 
@@ -41,12 +42,65 @@ Grid geometry is computed once the flow count is known: `cols = ceil(sqrt(n))`,
 `missed`, `mbps` and `live`, plus `cols`, `rows`, `outW`, `outH` and
 `grainBytes`. It is CORS-open.
 
+## NMOS
+
+With `NMOS_HOST_ADDRESS` set the compositor is an NMOS Node: it registers over
+AMWA IS-04 and offers one BCP-007-03 MXL Receiver per tile over IS-05, named
+`tile-0`, `tile-1`, and so on. A controller connecting a Receiver to an MXL
+Sender puts that flow on the tile; disconnecting it, or connecting it with no
+flow, leaves the tile black. A tile started from `MXL_FLOW_IDS` is reported as
+already connected to that flow.
+
+The Receivers are served under IS-05 v1.2, the first version that knows the
+MXL transport. Each names the domain its reader opens in `mxl_domain_id`, read
+from `<MXL_DOMAIN>/domain_def.json` as BCP-007-03 lays it out, and refuses any
+other. The Node is not started until that file yields a UUID: an MXL Receiver
+with no domain to name is one no controller can route to. It retries every ten
+seconds and logs why; the mosaic runs meanwhile.
+
+A flow whose frame size is not the tile's is not shown, because tiles are
+composited at their native size without scaling. The tile stays black and the
+reason is logged.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NMOS_HOST_ADDRESS` | unset, NMOS off | Address the Node APIs are reached at |
+| `NMOS_SEED` | none, required with NMOS | Seed for resource ids; stable per instance |
+| `NMOS_HTTP_PORT` | library default | Port for the Node and Connection APIs |
+| `NMOS_LABEL` | `MXL compositor` | Node and Device label |
+| `NMOS_DESCRIPTION` | `MXL mosaic compositor` | Node and Device description |
+| `NMOS_REGISTRY_HOST` | unset, DNS-SD | Fixed IS-04 Registration API; disables discovery |
+| `NMOS_REGISTRY_PORT` | `80` | Its port |
+| `NMOS_SYSTEM_HOST` | `NMOS_REGISTRY_HOST` | Fixed IS-09 System API |
+| `NMOS_SYSTEM_PORT` | `NMOS_REGISTRY_PORT` | Its port |
+| `NMOS_DNS_DOMAIN` | from resolv.conf | DNS-SD domain to browse for a registry |
+
+The Node is [NvNmos](https://github.com/NVIDIA/nvnmos), NVIDIA's C API over
+nmos-cpp, pinned by commit in the Dockerfile's `NVNMOS_REF`.
+
+### Conformance
+
+    tests/nmos/run.sh
+
+stands up an nmos-cpp registry and the compositor as a Node with Docker Compose
+and runs the AMWA NMOS Testing Tool's IS-04-01, IS-05-01, IS-05-02 and
+BCP-007-03-01 suites against it. A warning is reported but does not fail a
+suite. It needs `/dev/shm` for the MXL domain.
+
 ## Building
 
     docker build -t dmf-mf-mxl-compositor .
 
-`ARG GO_MXL_TAG` selects the `go-mxl-builder` and `go-mxl-runtime` base images
-and is the only version knob.
+`ARG GO_MXL_TAG` selects the `go-mxl-builder` and `go-mxl-runtime` base images.
+`ARG NVNMOS_REF` selects the libnvnmos image, built from
+`docker/nvnmos/Dockerfile`:
+
+    docker build -f docker/nvnmos/Dockerfile --build-arg NVNMOS_REF=<ref> \
+        -t ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:<ref> docker/nvnmos
+
+Its dependencies are compiled from source and take the better part of an hour,
+so the build workflow publishes it only when the pinned tag is missing, and the
+compositor image copies the one library out of it.
 
 ### go-mxl lock-step
 

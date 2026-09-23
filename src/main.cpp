@@ -7,7 +7,9 @@
 // wall-clocks burned in by the writers (mxl-gst-testsrc's clockoverlay
 // element) actually agree across tiles at composite time.
 //
-// Flow list comes from the MXL_FLOW_IDS env var (space-separated UUIDs).
+// Flow list comes from the MXL_FLOW_IDS env var (space-separated UUIDs), one
+// tile per flow. MXL_TILES adds tiles that start empty, for a controller to
+// connect over NMOS (see src/nmos/node.hpp).
 // Output destination from MXL_COMPOSITE_OUT (default rtsp://mediamtx:8554/composite).
 // MXL domain from MXL_DOMAIN (default /domain).
 //
@@ -24,6 +26,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -34,6 +38,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include "nmos/node.hpp"
+#include "nmos/slots.hpp"
 
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
@@ -79,6 +86,23 @@ namespace
         std::string tok;
         while (is >> tok) out.push_back(tok);
         return out;
+    }
+
+    // Minimal extractor for a top-level string field in the flow-def JSON,
+    // e.g. "media_type": "video/v210". Same matching rules as json_int_field;
+    // returns "" if absent or not a string.
+    std::string json_str_field(std::string const& json, char const* field)
+    {
+        auto const key = std::string{"\""} + field + "\"";
+        auto pos = json.find(key);
+        if (pos == std::string::npos) return "";
+        pos = json.find(':', pos + key.size());
+        if (pos == std::string::npos) return "";
+        pos = json.find_first_not_of(" \t", pos + 1);
+        if (pos == std::string::npos || json[pos] != '"') return "";
+        auto const end = json.find('"', pos + 1);
+        if (end == std::string::npos) return "";
+        return json.substr(pos + 1, end - pos - 1);
     }
 
     // Minimal extractor for a top-level integer field in the flow-def JSON,
@@ -150,7 +174,11 @@ namespace
     struct FlowWorker
     {
         std::size_t index;
+        // The flow this worker has open, or is opening. Owned by the worker
+        // thread; what the tile should show is slots->get(index), which the
+        // worker follows.
         std::string flowId;
+        nmos_slots::Slots* slots{nullptr};
         std::string domain;
         ::mxlInstance instance{nullptr};
         ::mxlFlowReader reader{nullptr};
@@ -171,6 +199,33 @@ namespace
     {
         std::int64_t stride = static_cast<std::int64_t>((w + 47) / 48) * 128;
         return stride * h;
+    }
+
+    // black_v210 is one v210 frame of video black: luma 64, chroma 512, packed
+    // three 10-bit samples to a little-endian 32-bit word in the order
+    // Cb Y Cr, Y Cb Y, Cr Y Cb, Y Cr Y.
+    std::vector<std::uint8_t> black_v210(int w, int h)
+    {
+        std::int64_t const stride = static_cast<std::int64_t>((w + 47) / 48) * 128;
+        std::vector<std::uint8_t> out(static_cast<std::size_t>(stride * h));
+        auto word = [](std::uint32_t a, std::uint32_t b, std::uint32_t c) {
+            return a | (b << 10) | (c << 20);
+        };
+        std::uint32_t const words[4] = {
+            word(512, 64, 512), word(64, 512, 64), word(512, 64, 512), word(64, 512, 64)};
+        for (int y = 0; y < h; ++y)
+        {
+            auto* row = out.data() + static_cast<std::size_t>(stride) * y;
+            for (std::int64_t off = 0; off + 4 <= stride; off += 4)
+            {
+                std::uint32_t v = words[(off / 4) % 4];
+                row[off] = v & 0xff;
+                row[off + 1] = (v >> 8) & 0xff;
+                row[off + 2] = (v >> 16) & 0xff;
+                row[off + 3] = (v >> 24) & 0xff;
+            }
+        }
+        return out;
     }
 
     // Minimal single-threaded HTTP/1.0 responder for /stats.json. No deps --
@@ -227,7 +282,7 @@ namespace
                 double mbps = fps * static_cast<double>(g_grainBytes) * 8.0 / 1.0e6;
                 if (i) body << ',';
                 body << "{\"i\":" << i
-                     << ",\"flowId\":\"" << w.flowId << "\""
+                     << ",\"flowId\":\"" << w.slots->get(i) << "\""
                      << ",\"label\":\"MXL-" << (i + 1) << "\""
                      << ",\"fps\":" << fps
                      << ",\"pushed\":" << w.framesPushed.load()
@@ -258,6 +313,13 @@ namespace
     {
         using clock = std::chrono::steady_clock;
         auto rate = w->config.common.grainRate;
+        // A tile that starts with nothing connected has no flow to take a rate
+        // from; it runs at the rate the mosaic is encoded at.
+        if (rate.numerator <= 0)
+        {
+            rate.numerator = 30000;
+            rate.denominator = 1001;
+        }
 
         // Drive the read loop off a monotonic clock at the flow's grain rate.
         // The producers (mxl-gst-testsrc) free-run at ~5x realtime, so each
@@ -291,8 +353,9 @@ namespace
         // dimensions, so read them from the flow def. Producers that don't
         // rescale (e.g. the SRT bridge) publish whatever resolution they
         // ingest, so this can't be assumed to be 1080p.
-        int vw = 1920;
-        int vh = 1080;
+        int vw = g_frameW;
+        int vh = g_frameH;
+        if (!w->flowId.empty())
         {
             std::vector<char> defBuf(16384);
             std::size_t defSize = defBuf.size();
@@ -357,8 +420,55 @@ namespace
             else std::this_thread::sleep_until(nextTick);
         };
 
+        auto const black = black_v210(vw, vh);
+        auto push = [&](std::uint8_t const* data, std::size_t size) {
+            auto* buf = ::gst_buffer_new_allocate(nullptr, size, nullptr);
+            GstMapInfo map{};
+            ::gst_buffer_map(buf, &map, GST_MAP_WRITE);
+            std::memcpy(map.data, data, size);
+            ::gst_buffer_unmap(buf, &map);
+            GST_BUFFER_DURATION(buf) =
+                ::gst_util_uint64_scale_int(GST_SECOND, rate.denominator, rate.numerator);
+            GstFlowReturn ret = GST_FLOW_OK;
+            ::g_signal_emit_by_name(w->appsrc, "push-buffer", buf, &ret);
+            ::gst_buffer_unref(buf);
+            return ret;
+        };
+        // A flow whose frame size is not the tile's. The tile is composited
+        // at its native size with no scaler, so such a flow is refused and the
+        // tile stays black until something else is connected.
+        std::string refused;
+
         while (!g_exit.load(std::memory_order_relaxed))
         {
+            // Follow the tile's slot. A controller connecting another flow
+            // over NMOS changes it; the reader is dropped here and the guard
+            // below opens the new one.
+            if (auto want = w->slots->get(w->index); want != w->flowId)
+            {
+                if (w->reader != nullptr)
+                {
+                    ::mxlReleaseFlowReader(w->instance, w->reader);
+                    w->reader = nullptr;
+                }
+                g_print("[%zu] tile now %s (was %s)\n", w->index,
+                    want.empty() ? "(none)" : want.c_str(),
+                    w->flowId.empty() ? "(none)" : w->flowId.c_str());
+                w->flowId = std::move(want);
+                refused.clear();
+                lastHead = 0;
+                stallTicks = 0;
+                lastShownIndex = -1;
+            }
+
+            if (w->flowId.empty() || w->flowId == refused)
+            {
+                auto ret = push(black.data(), black.size());
+                if (ret != GST_FLOW_OK && ret != GST_FLOW_FLUSHING) break;
+                pace();
+                continue;
+            }
+
             // Re-open a reader dropped by the watchdog or the FLOW_INVALID path
             // below, once the flow is published again. Keeps reopen logic in one
             // place so both stalls and hard tear-downs recover identically.
@@ -373,10 +483,49 @@ namespace
                     stallTicks = 0;
                     lastShownIndex = -1;
                     g_print("[%zu] %s reader re-opened\n", w->index, w->flowId.c_str());
+
+                    std::vector<char> defBuf(16384);
+                    std::size_t defSize = defBuf.size();
+                    if (::mxlGetFlowDef(w->instance, w->flowId.c_str(), defBuf.data(), &defSize) == MXL_STATUS_OK)
+                    {
+                        std::string const def{defBuf.data()};
+                        // A controller can connect any flow id to a tile. Only
+                        // v210 video is drawn; audio or ancillary data would
+                        // freeze the tile, and data grains are never complete,
+                        // so a read would wait out its whole timeout each tick.
+                        auto const mediaType = json_str_field(def, "media_type");
+                        if (mediaType != "video/v210")
+                        {
+                            g_printerr("[%zu] %s is %s, not video/v210; not shown\n",
+                                w->index, w->flowId.c_str(),
+                                mediaType.empty() ? "of unknown type" : mediaType.c_str());
+                            ::mxlReleaseFlowReader(w->instance, w->reader);
+                            w->reader = nullptr;
+                            refused = w->flowId;
+                            continue;
+                        }
+                        int const fw = json_int_field(def, "frame_width");
+                        int const fh = json_int_field(def, "frame_height");
+                        if (fw > 0 && fh > 0 && (fw != vw || fh != vh))
+                        {
+                            g_printerr("[%zu] %s is %dx%d, the tile is %dx%d; not shown\n",
+                                w->index, w->flowId.c_str(), fw, fh, vw, vh);
+                            ::mxlReleaseFlowReader(w->instance, w->reader);
+                            w->reader = nullptr;
+                            refused = w->flowId;
+                            continue;
+                        }
+                    }
                 }
                 else
                 {
-                    pace();  // flow not back yet; hold cadence and retry
+                    // Not in the domain yet. Black rather than the last frame
+                    // of whatever was shown before: once a controller has
+                    // switched the tile, its Receiver reports the new flow, and
+                    // a picture from the old one would contradict it.
+                    auto ret = push(black.data(), black.size());
+                    if (ret != GST_FLOW_OK && ret != GST_FLOW_FLUSHING) break;
+                    pace();
                     continue;
                 }
             }
@@ -543,9 +692,18 @@ int main(int argc, char** argv)
     g_print("Source tile resolution: %dx%d\n", g_frameW, g_frameH);
     auto flowIds = split_ws(flowIdsStr);
 
+    // MXL_TILES is the tile count where it exceeds the flows named: the
+    // extra tiles start empty and show black until a controller connects a
+    // flow to them over NMOS.
+    {
+        int const tiles = std::atoi(env_or("MXL_TILES", "0").c_str());
+        if (tiles > 0 && static_cast<std::size_t>(tiles) > flowIds.size())
+            flowIds.resize(static_cast<std::size_t>(tiles));
+    }
     if (flowIds.empty())
     {
-        g_printerr("MXL_FLOW_IDS empty -- set it to a space-separated list of UUIDs\n");
+        g_printerr("no tiles -- set MXL_FLOW_IDS to a space-separated list of UUIDs, "
+                   "or MXL_TILES to a count to connect over NMOS\n");
         return 2;
     }
     if (flowIds.size() > 16)
@@ -697,14 +855,51 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // NMOS is on where the Node is given an address to be reached at. Off, the
+    // compositor shows MXL_FLOW_IDS exactly as it always has. Read and checked
+    // before anything else starts: a missing seed is a configuration error,
+    // and returning once worker threads run would abort rather than exit.
+    auto const nmosHost = env_or("NMOS_HOST_ADDRESS", "");
+    bool const nmosOn = !nmosHost.empty();
+    nmos_node::Config nc;
+    if (nmosOn)
+    {
+        nc.domainPath = domain;
+        nc.hostAddress = nmosHost;
+        nc.httpPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_HTTP_PORT", "0").c_str()));
+        nc.seed = env_or("NMOS_SEED", "");
+        nc.label = env_or("NMOS_LABEL", "MXL compositor");
+        nc.description = env_or("NMOS_DESCRIPTION", "MXL mosaic compositor");
+        nc.dnsDomain = env_or("NMOS_DNS_DOMAIN", "");
+        nc.registryHost = env_or("NMOS_REGISTRY_HOST", "");
+        nc.registryPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_REGISTRY_PORT", "0").c_str()));
+        // nmos-cpp serves the IS-09 System API beside its registry, so a
+        // registry named by address is the System API too unless told apart.
+        nc.systemHost = env_or("NMOS_SYSTEM_HOST", nc.registryHost.c_str());
+        nc.systemPort = static_cast<unsigned int>(std::atoi(
+            env_or("NMOS_SYSTEM_PORT", env_or("NMOS_REGISTRY_PORT", "0").c_str()).c_str()));
+        nc.frameWidth = g_frameW;
+        nc.frameHeight = g_frameH;
+        if (nc.seed.empty())
+        {
+            // Resource ids are derived from the seed, so without one they
+            // change on every restart and a controller's connections point at
+            // resources that no longer exist.
+            g_printerr("NMOS_SEED is required with NMOS_HOST_ADDRESS\n");
+            return 8;
+        }
+    }
+
     // Open every MXL flow before going live, retrying per flow until it
     // appears (see the loop below) so a not-yet-mirrored flow doesn't wedge.
+    nmos_slots::Slots slots{flowIds};
     std::vector<FlowWorker> workers(flowIds.size());
     for (std::size_t i = 0; i < flowIds.size(); ++i)
     {
         auto& w = workers[i];
         w.index = i;
         w.flowId = flowIds[i];
+        w.slots = &slots;
         w.domain = domain;
 
         w.instance = ::mxlCreateInstance(domain.c_str(), "");
@@ -724,7 +919,11 @@ int main(int argc, char** argv)
         // ever. So never exit for a missing flow -- stay Running (container ready,
         // a stable consumer) so the mirror forms and the flow arrives. Killable
         // via SIGTERM (g_exit).
-        for (int attempt = 1;; ++attempt)
+        // With NMOS on, a booked flow that is not there yet is left to the
+        // worker's reopen path instead: waiting here holds back the Node, and
+        // with it the one way a controller could replace a flow that never
+        // appears.
+        for (int attempt = 1; !w.flowId.empty() && !nmosOn; ++attempt)
         {
             auto ret = ::mxlCreateFlowReader(w.instance, w.flowId.c_str(), "", &w.reader);
             if (ret == MXL_STATUS_OK) break;
@@ -735,7 +934,7 @@ int main(int argc, char** argv)
             std::this_thread::sleep_for(std::chrono::seconds(2));
         }
 
-        if (auto ret = ::mxlFlowReaderGetConfigInfo(w.reader, &w.config);
+        if (auto ret = w.reader ? ::mxlFlowReaderGetConfigInfo(w.reader, &w.config) : MXL_STATUS_OK;
             ret != MXL_STATUS_OK)
         {
             g_printerr("mxlFlowReaderGetConfigInfo %s failed: %d\n", w.flowId.c_str(), static_cast<int>(ret));
@@ -760,6 +959,34 @@ int main(int argc, char** argv)
     for (auto& w : workers)
     {
         w.thread = std::thread{worker_loop, &w};
+    }
+
+    nmos_node::NodePtr node;
+    std::mutex nodeMu;
+    std::thread nmosStarter;
+    if (nmosOn)
+    {
+        // Started once the domain has its identity, and not before: an MXL
+        // Receiver with no domain to name is one no controller can route to,
+        // so none is published. The platform may write domain_def.json after
+        // this starts, which is why this retries rather than exits; the
+        // mosaic runs from MXL_FLOW_IDS meanwhile.
+        nmosStarter = std::thread{[nc, &slots, &node, &nodeMu]() {
+            for (int attempt = 0; !g_exit.load(std::memory_order_relaxed); ++attempt)
+            {
+                std::string err;
+                auto started = nmos_node::start(nc, slots, err);
+                if (started)
+                {
+                    std::lock_guard<std::mutex> lock{nodeMu};
+                    node = std::move(started);
+                    return;
+                }
+                if (attempt % 6 == 0) g_printerr("NMOS not started: %s\n", err.c_str());
+                for (int i = 0; i < 20 && !g_exit.load(std::memory_order_relaxed); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }};
     }
 
     // Diagnostic ticker: every 5s, report per-flow push/miss counters.
@@ -831,6 +1058,11 @@ int main(int argc, char** argv)
     }
     ::gst_object_unref(bus);
 
+    if (nmosStarter.joinable()) nmosStarter.join();
+    {
+        std::lock_guard<std::mutex> lock{nodeMu};
+        node.reset();
+    }
     g_print("Shutting down workers...\n");
     if (stats.joinable()) stats.join();
     if (statsHttp.joinable()) statsHttp.join();

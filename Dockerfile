@@ -12,6 +12,16 @@
 # renovate: datasource=docker depName=ghcr.io/qvest-digital/go-mxl-builder
 ARG GO_MXL_TAG=1.0.0-rc.12
 
+# NvNmos, NVIDIA's C API over nmos-cpp, provides the NMOS Node: IS-04
+# registration, the IS-05 Connection API and BCP-007-03's MXL transport. It is
+# built by docker/nvnmos/Dockerfile into its own image, tagged by the NvNmos
+# commit, because its dependencies take the better part of an hour to compile.
+# The build workflow publishes that image when the tag is missing.
+ARG NVNMOS_REF=36fb7db9b5616a26f77164de735c15171e01aaed
+ARG NVNMOS_IMAGE=ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:${NVNMOS_REF}
+
+FROM ${NVNMOS_IMAGE} AS nvnmos
+
 # -- Stage 1: build the compositor binary ------------------------------------
 FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS build
 
@@ -30,6 +40,8 @@ WORKDIR /src
 COPY CMakeLists.txt /src/
 COPY vendor /src/vendor/
 COPY src /src/src/
+COPY tests/domain_test.cpp /src/tests/
+COPY --from=nvnmos /opt/nvnmos /opt/nvnmos
 
 # The builder image ships libmxl under /opt/libmxl/lib without a multiarch
 # symlink in /usr/lib/x86_64-linux-gnu, so `-lmxl` does not resolve on its
@@ -38,8 +50,9 @@ COPY src /src/src/
 RUN ln -s /opt/libmxl/lib/libmxl.so /usr/lib/x86_64-linux-gnu/libmxl.so \
  && ln -s /opt/libmxl/lib/libmxl-fabrics.so /usr/lib/x86_64-linux-gnu/libmxl-fabrics.so
 
-RUN cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release \
+RUN cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release -DNVNMOS_ROOT=/opt/nvnmos \
  && cmake --build /src/build --parallel \
+ && ctest --test-dir /src/build --output-on-failure \
  && cmake --install /src/build --prefix /opt/mxl-compositor
 
 # -- Stage 2: slim runtime on the matching runtime image --------------------
@@ -59,8 +72,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/mxl-compositor/bin/mxl-multi-compositor /usr/bin/
-# Companion entry point in the same image: the audio-flow preview publisher,
-# selected by overriding the container command. The compositor stays default.
+COPY --from=nvnmos /opt/nvnmos/lib/libnvnmos.so /usr/lib/x86_64-linux-gnu/
 
 WORKDIR /home/mxl
 ENTRYPOINT ["/usr/bin/mxl-multi-compositor"]

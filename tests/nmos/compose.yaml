@@ -1,0 +1,103 @@
+# NMOS conformance lane: an nmos-cpp registry, the compositor as an NMOS Node,
+# and the AMWA NMOS Testing Tool, on one fixed-address network so the Node can
+# be told the address it is reached at. run.sh drives it.
+#
+# The MXL domain is a directory on the host's /dev/shm, which is tmpfs as
+# libmxl requires, holding only the domain_def.json the platform would write.
+# run.sh creates it; a docker tmpfs volume would not do, because every
+# container mounting one gets a tmpfs of its own. No flow is written into it: the
+# suites test what the Node publishes and how it answers IS-05, and a tile
+# connected to a flow that is not there stays black without failing.
+
+name: compositor-nmos
+
+networks:
+  lane:
+    ipam:
+      config:
+        - subnet: 172.30.99.0/24
+
+services:
+  registry:
+    image: rhastie/nmos-cpp:master-079620d
+    networks:
+      lane:
+        ipv4_address: 172.30.99.10
+    configs:
+      - source: registry-container-config
+        target: /home/container-config
+      - source: registry-json
+        target: /config/registry.json
+
+  rtsp:
+    image: bluenviron/mediamtx:1.15.1
+    networks:
+      lane:
+        ipv4_address: 172.30.99.11
+
+  compositor:
+    image: ${COMPOSITOR_IMAGE:-compositor-nmos:dev}
+    depends_on:
+      registry:
+        condition: service_started
+      rtsp:
+        condition: service_started
+    networks:
+      lane:
+        ipv4_address: 172.30.99.20
+    volumes:
+      - ${DOMAIN_DIR:?run.sh creates the domain directory}:/domain
+    environment:
+      MXL_DOMAIN: /domain
+      MXL_TILES: "2"
+      MXL_COMPOSITE_OUT: rtsp://172.30.99.11:8554/composite
+      MXL_FRAME_WIDTH: "1280"
+      MXL_FRAME_HEIGHT: "720"
+      NMOS_HOST_ADDRESS: 172.30.99.20
+      NMOS_HTTP_PORT: "8080"
+      NMOS_SEED: compositor-nmos-lane
+      NMOS_REGISTRY_HOST: 172.30.99.10
+      NMOS_REGISTRY_PORT: "8010"
+
+  testing:
+    image: amwa/nmos-testing:master-9001851
+    profiles: [suite]
+    networks:
+      lane:
+        ipv4_address: 172.30.99.30
+    configs:
+      - source: testing-config
+        target: /config/UserConfig.py
+    # The suite arguments arrive as "$@" after the script, so compose run can
+    # pass them without replacing the script.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        python3 nmos-test.py "$$@" --output /tmp/report.xml
+        rc=$$?
+        echo "----- BEGIN JUNIT -----"
+        cat /tmp/report.xml 2>/dev/null || echo "(no report written)"
+        echo "----- END JUNIT -----"
+        exit $$rc
+      - sh
+
+configs:
+  registry-container-config:
+    content: |
+      registry_json=/config/registry.json
+      log_output=FALSE
+      update_label=FALSE
+      update_ptp_domain=FALSE
+      run_mqtt=FALSE
+  registry-json:
+    content: |
+      {"label":"lane","http_port":8010,"query_ws_port":8011,"logging_level":0,
+       "href_mode":2,"host_address":"172.30.99.10","host_addresses":["172.30.99.10"],
+       "seed_id":"b6c4f4a0-9c1e-5a3d-8f2b-0d51c8e4a710"}
+  testing-config:
+    content: |
+      from . import Config as CONFIG
+      CONFIG.ENABLE_DNS_SD = False
+      CONFIG.QUERY_API_HOST = "172.30.99.10"
+      CONFIG.QUERY_API_PORT = 8010
