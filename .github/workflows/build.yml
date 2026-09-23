@@ -29,6 +29,11 @@ jobs:
   # to the compositor build below.
   nvnmos:
     runs-on: ubuntu-latest
+    # One libnvnmos build at a time. Two runs that both find the tag missing
+    # would otherwise each spend the better part of an hour and push it twice.
+    concurrency:
+      group: nvnmos
+      cancel-in-progress: false
     outputs:
       image: ${{ steps.ref.outputs.image }}
       built: ${{ steps.check.outputs.missing }}

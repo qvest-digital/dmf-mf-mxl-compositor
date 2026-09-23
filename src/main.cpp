@@ -88,6 +88,23 @@ namespace
         return out;
     }
 
+    // Minimal extractor for a top-level string field in the flow-def JSON,
+    // e.g. "media_type": "video/v210". Same matching rules as json_int_field;
+    // returns "" if absent or not a string.
+    std::string json_str_field(std::string const& json, char const* field)
+    {
+        auto const key = std::string{"\""} + field + "\"";
+        auto pos = json.find(key);
+        if (pos == std::string::npos) return "";
+        pos = json.find(':', pos + key.size());
+        if (pos == std::string::npos) return "";
+        pos = json.find_first_not_of(" \t", pos + 1);
+        if (pos == std::string::npos || json[pos] != '"') return "";
+        auto const end = json.find('"', pos + 1);
+        if (end == std::string::npos) return "";
+        return json.substr(pos + 1, end - pos - 1);
+    }
+
     // Minimal extractor for a top-level integer field in the flow-def JSON,
     // e.g. "frame_width": 1920. Avoids pulling in a JSON dependency for two
     // numbers. Matches the exact quoted key so it won't collide with the
@@ -438,6 +455,7 @@ namespace
                     want.empty() ? "(none)" : want.c_str(),
                     w->flowId.empty() ? "(none)" : w->flowId.c_str());
                 w->flowId = std::move(want);
+                refused.clear();
                 lastHead = 0;
                 stallTicks = 0;
                 lastShownIndex = -1;
@@ -471,6 +489,21 @@ namespace
                     if (::mxlGetFlowDef(w->instance, w->flowId.c_str(), defBuf.data(), &defSize) == MXL_STATUS_OK)
                     {
                         std::string const def{defBuf.data()};
+                        // A controller can connect any flow id to a tile. Only
+                        // v210 video is drawn; audio or ancillary data would
+                        // freeze the tile, and data grains are never complete,
+                        // so a read would wait out its whole timeout each tick.
+                        auto const mediaType = json_str_field(def, "media_type");
+                        if (mediaType != "video/v210")
+                        {
+                            g_printerr("[%zu] %s is %s, not video/v210; not shown\n",
+                                w->index, w->flowId.c_str(),
+                                mediaType.empty() ? "of unknown type" : mediaType.c_str());
+                            ::mxlReleaseFlowReader(w->instance, w->reader);
+                            w->reader = nullptr;
+                            refused = w->flowId;
+                            continue;
+                        }
                         int const fw = json_int_field(def, "frame_width");
                         int const fh = json_int_field(def, "frame_height");
                         if (fw > 0 && fh > 0 && (fw != vw || fh != vh))
@@ -486,7 +519,13 @@ namespace
                 }
                 else
                 {
-                    pace();  // flow not back yet; hold cadence and retry
+                    // Not in the domain yet. Black rather than the last frame
+                    // of whatever was shown before: once a controller has
+                    // switched the tile, its Receiver reports the new flow, and
+                    // a picture from the old one would contradict it.
+                    auto ret = push(black.data(), black.size());
+                    if (ret != GST_FLOW_OK && ret != GST_FLOW_FLUSHING) break;
+                    pace();
                     continue;
                 }
             }
@@ -816,6 +855,41 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // NMOS is on where the Node is given an address to be reached at. Off, the
+    // compositor shows MXL_FLOW_IDS exactly as it always has. Read and checked
+    // before anything else starts: a missing seed is a configuration error,
+    // and returning once worker threads run would abort rather than exit.
+    auto const nmosHost = env_or("NMOS_HOST_ADDRESS", "");
+    bool const nmosOn = !nmosHost.empty();
+    nmos_node::Config nc;
+    if (nmosOn)
+    {
+        nc.domainPath = domain;
+        nc.hostAddress = nmosHost;
+        nc.httpPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_HTTP_PORT", "0").c_str()));
+        nc.seed = env_or("NMOS_SEED", "");
+        nc.label = env_or("NMOS_LABEL", "MXL compositor");
+        nc.description = env_or("NMOS_DESCRIPTION", "MXL mosaic compositor");
+        nc.dnsDomain = env_or("NMOS_DNS_DOMAIN", "");
+        nc.registryHost = env_or("NMOS_REGISTRY_HOST", "");
+        nc.registryPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_REGISTRY_PORT", "0").c_str()));
+        // nmos-cpp serves the IS-09 System API beside its registry, so a
+        // registry named by address is the System API too unless told apart.
+        nc.systemHost = env_or("NMOS_SYSTEM_HOST", nc.registryHost.c_str());
+        nc.systemPort = static_cast<unsigned int>(std::atoi(
+            env_or("NMOS_SYSTEM_PORT", env_or("NMOS_REGISTRY_PORT", "0").c_str()).c_str()));
+        nc.frameWidth = g_frameW;
+        nc.frameHeight = g_frameH;
+        if (nc.seed.empty())
+        {
+            // Resource ids are derived from the seed, so without one they
+            // change on every restart and a controller's connections point at
+            // resources that no longer exist.
+            g_printerr("NMOS_SEED is required with NMOS_HOST_ADDRESS\n");
+            return 8;
+        }
+    }
+
     // Open every MXL flow before going live, retrying per flow until it
     // appears (see the loop below) so a not-yet-mirrored flow doesn't wedge.
     nmos_slots::Slots slots{flowIds};
@@ -845,7 +919,11 @@ int main(int argc, char** argv)
         // ever. So never exit for a missing flow -- stay Running (container ready,
         // a stable consumer) so the mirror forms and the flow arrives. Killable
         // via SIGTERM (g_exit).
-        for (int attempt = 1; !w.flowId.empty(); ++attempt)
+        // With NMOS on, a booked flow that is not there yet is left to the
+        // worker's reopen path instead: waiting here holds back the Node, and
+        // with it the one way a controller could replace a flow that never
+        // appears.
+        for (int attempt = 1; !w.flowId.empty() && !nmosOn; ++attempt)
         {
             auto ret = ::mxlCreateFlowReader(w.instance, w.flowId.c_str(), "", &w.reader);
             if (ret == MXL_STATUS_OK) break;
@@ -883,38 +961,11 @@ int main(int argc, char** argv)
         w.thread = std::thread{worker_loop, &w};
     }
 
-    // NMOS is on where the Node is given an address to be reached at. Off, the
-    // compositor shows MXL_FLOW_IDS exactly as it always has.
     nmos_node::NodePtr node;
     std::mutex nodeMu;
     std::thread nmosStarter;
-    if (auto host = env_or("NMOS_HOST_ADDRESS", ""); !host.empty())
+    if (nmosOn)
     {
-        nmos_node::Config nc;
-        nc.domainPath = domain;
-        nc.hostAddress = host;
-        nc.httpPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_HTTP_PORT", "0").c_str()));
-        nc.seed = env_or("NMOS_SEED", "");
-        nc.label = env_or("NMOS_LABEL", "MXL compositor");
-        nc.description = env_or("NMOS_DESCRIPTION", "MXL mosaic compositor");
-        nc.dnsDomain = env_or("NMOS_DNS_DOMAIN", "");
-        nc.registryHost = env_or("NMOS_REGISTRY_HOST", "");
-        nc.registryPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_REGISTRY_PORT", "0").c_str()));
-        // nmos-cpp serves the IS-09 System API beside its registry, so a
-        // registry named by address is the System API too unless told apart.
-        nc.systemHost = env_or("NMOS_SYSTEM_HOST", nc.registryHost.c_str());
-        nc.systemPort = static_cast<unsigned int>(std::atoi(
-            env_or("NMOS_SYSTEM_PORT", env_or("NMOS_REGISTRY_PORT", "0").c_str()).c_str()));
-        nc.frameWidth = g_frameW;
-        nc.frameHeight = g_frameH;
-        if (nc.seed.empty())
-        {
-            // Resource ids are derived from the seed, so without one they
-            // change on every restart and a controller's connections point at
-            // resources that no longer exist.
-            g_printerr("NMOS_SEED is required with NMOS_HOST_ADDRESS\n");
-            return 8;
-        }
         // Started once the domain has its identity, and not before: an MXL
         // Receiver with no domain to name is one no controller can route to,
         // so none is published. The platform may write domain_def.json after
