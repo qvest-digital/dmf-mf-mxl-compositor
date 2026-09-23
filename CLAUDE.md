@@ -37,12 +37,16 @@ remote happens in the worktree.
 
 ## go-mxl lock-step
 
-`ARG GO_MXL_TAG` selects both base images and is the only version knob. MXL's
+`ARG GO_MXL_TAG` selects both base images. MXL's
 domain protocol requires every reader and writer sharing a domain to load a
 byte-identical `libmxl.so`; a mismatch surfaces as `MXL_ERR_UNKNOWN` from
 `mxlCreateFlowReader`, or as grains that read as garbage. Bumping it here
 without bumping the gateway and node agent reading the same domain breaks
 them. Renovate proposes the bump; accepting it is a cross-repository decision.
+
+`ARG NVNMOS_REF` pins the NvNmos commit the NMOS Node is built from, and
+names the libnvnmos image the build workflow publishes when it is missing.
+It is independent of `GO_MXL_TAG`: libnvnmos does not link libmxl.
 
 `vendor/mxl/` holds MXL headers from an external source. Preserve their SPDX
 lines. `libmxl.so` itself comes from the base image.
