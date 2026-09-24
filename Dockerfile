@@ -15,10 +15,13 @@ ARG GO_MXL_TAG=1.0.0-rc.12
 # NvNmos, NVIDIA's C API over nmos-cpp, provides the NMOS Node: IS-04
 # registration, the IS-05 Connection API and BCP-007-03's MXL transport. It is
 # built by docker/nvnmos/Dockerfile into its own image, tagged by the NvNmos
-# commit, because its dependencies take the better part of an hour to compile.
-# The build workflow publishes that image when the tag is missing.
+# commit and the patches applied to it, because its dependencies take the
+# better part of an hour to compile. The build workflow publishes that image
+# when the tag is missing, and refuses a NVNMOS_PATCHES that is not the first
+# 8 hex digits of sha256sum docker/nvnmos/patches/*.patch | sha256sum.
 ARG NVNMOS_REF=36fb7db9b5616a26f77164de735c15171e01aaed
-ARG NVNMOS_IMAGE=ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:${NVNMOS_REF}
+ARG NVNMOS_PATCHES=738ca8fb
+ARG NVNMOS_IMAGE=ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:${NVNMOS_REF}-${NVNMOS_PATCHES}
 
 FROM ${NVNMOS_IMAGE} AS nvnmos
 

@@ -11,7 +11,10 @@
 // tile per flow. MXL_TILES adds tiles that start empty, for a controller to
 // connect over NMOS (see src/nmos/node.hpp).
 // Output destination from MXL_COMPOSITE_OUT (default rtsp://mediamtx:8554/composite).
-// MXL domain from MXL_DOMAIN (default /domain).
+// MXL domain from MXL_DOMAIN (default /domain); MXL_FLOW_IDS names flows in
+// it. Over NMOS a tile can be connected to a flow in that domain or in any
+// domain under MXL_DOMAINS_DIR (default: domains beside MXL_DOMAIN), each a
+// directory named by the domain's id.
 //
 // Each flow runs a worker thread that drives a dedicated appsrc with v210
 // grains. The compositor element does the layout in I420 space; encoding
@@ -26,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -179,8 +183,12 @@ namespace
         // worker follows.
         std::string flowId;
         nmos_slots::Slots* slots{nullptr};
+        // The domain directory flowId is read from, and the instance open on
+        // it. One instance per domain the tile has been connected in, kept
+        // until exit: libmxl reads a domain's options when it opens one.
         std::string domain;
         ::mxlInstance instance{nullptr};
+        std::map<std::string, ::mxlInstance> instances;
         ::mxlFlowReader reader{nullptr};
         ::mxlFlowConfigInfo config{};
         GstElement* appsrc{nullptr};
@@ -282,7 +290,7 @@ namespace
                 double mbps = fps * static_cast<double>(g_grainBytes) * 8.0 / 1.0e6;
                 if (i) body << ',';
                 body << "{\"i\":" << i
-                     << ",\"flowId\":\"" << w.slots->get(i) << "\""
+                     << ",\"flowId\":\"" << w.slots->get(i).flow << "\""
                      << ",\"label\":\"MXL-" << (i + 1) << "\""
                      << ",\"fps\":" << fps
                      << ",\"pushed\":" << w.framesPushed.load()
@@ -444,24 +452,39 @@ namespace
             // Follow the tile's slot. A controller connecting another flow
             // over NMOS changes it; the reader is dropped here and the guard
             // below opens the new one.
-            if (auto want = w->slots->get(w->index); want != w->flowId)
+            if (auto want = w->slots->get(w->index); want.flow != w->flowId || want.domain != w->domain)
             {
                 if (w->reader != nullptr)
                 {
                     ::mxlReleaseFlowReader(w->instance, w->reader);
                     w->reader = nullptr;
                 }
-                g_print("[%zu] tile now %s (was %s)\n", w->index,
-                    want.empty() ? "(none)" : want.c_str(),
+                g_print("[%zu] tile now %s in %s (was %s)\n", w->index,
+                    want.flow.empty() ? "(none)" : want.flow.c_str(), want.domain.c_str(),
                     w->flowId.empty() ? "(none)" : w->flowId.c_str());
-                w->flowId = std::move(want);
+                w->flowId = std::move(want.flow);
+                if (!w->flowId.empty() && want.domain != w->domain)
+                {
+                    auto& inst = w->instances[want.domain];
+                    if (inst == nullptr) inst = ::mxlCreateInstance(want.domain.c_str(), "");
+                    if (inst == nullptr)
+                    {
+                        // Drawn black, as a flow that is not there yet is;
+                        // the next connection retries the open.
+                        g_printerr("[%zu] mxlCreateInstance failed for %s\n", w->index, want.domain.c_str());
+                        w->instances.erase(want.domain);
+                        w->flowId.clear();
+                    }
+                    w->instance = inst;
+                }
+                w->domain = std::move(want.domain);
                 refused.clear();
                 lastHead = 0;
                 stallTicks = 0;
                 lastShownIndex = -1;
             }
 
-            if (w->flowId.empty() || w->flowId == refused)
+            if (w->flowId.empty() || w->flowId == refused || w->instance == nullptr)
             {
                 auto ret = push(black.data(), black.size());
                 if (ret != GST_FLOW_OK && ret != GST_FLOW_FLUSHING) break;
@@ -865,6 +888,12 @@ int main(int argc, char** argv)
     if (nmosOn)
     {
         nc.domainPath = domain;
+        nc.domainsDir = env_or("MXL_DOMAINS_DIR", "");
+        if (nc.domainsDir.empty())
+        {
+            auto const slash = domain.find_last_of('/');
+            nc.domainsDir = (slash == std::string::npos || slash == 0 ? std::string{} : domain.substr(0, slash)) + "/domains";
+        }
         nc.hostAddress = nmosHost;
         nc.httpPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_HTTP_PORT", "0").c_str()));
         nc.seed = env_or("NMOS_SEED", "");
@@ -892,7 +921,10 @@ int main(int argc, char** argv)
 
     // Open every MXL flow before going live, retrying per flow until it
     // appears (see the loop below) so a not-yet-mirrored flow doesn't wedge.
-    nmos_slots::Slots slots{flowIds};
+    // MXL_FLOW_IDS names flows in the primary domain.
+    std::vector<nmos_slots::Source> initial;
+    for (auto const& id : flowIds) initial.push_back({id.empty() ? std::string{} : domain, id});
+    nmos_slots::Slots slots{initial};
     std::vector<FlowWorker> workers(flowIds.size());
     for (std::size_t i = 0; i < flowIds.size(); ++i)
     {
@@ -908,6 +940,7 @@ int main(int argc, char** argv)
             g_printerr("mxlCreateInstance failed for flow %s\n", w.flowId.c_str());
             return 3;
         }
+        w.instances[domain] = w.instance;
 
         // Retry the reader open indefinitely instead of failing fast. The
         // anti-affinity keeps the compositor off the producer's node (to
@@ -1078,7 +1111,8 @@ int main(int argc, char** argv)
     {
         if (w.appsrc) ::gst_object_unref(w.appsrc);
         if (w.reader) ::mxlReleaseFlowReader(w.instance, w.reader);
-        if (w.instance) ::mxlDestroyInstance(w.instance);
+        for (auto& [path, inst] : w.instances)
+            if (inst) ::mxlDestroyInstance(inst);
     }
 
     return 0;

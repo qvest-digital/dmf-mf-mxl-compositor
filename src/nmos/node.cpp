@@ -16,6 +16,7 @@ namespace nmos_node
     public:
         NvNmosNodeServer server{};
         nmos_slots::Slots* slots{nullptr};
+        std::vector<nmos_domain::Domain> domains;
         std::vector<std::string> names;
         std::vector<std::string> flowDefs;
     };
@@ -27,17 +28,20 @@ namespace nmos_node
         // flow_def is an MXL flow definition for a tile's Receiver, the form
         // the library takes for an MXL transport file. Its "id" is the flow
         // the tile shows, or a zero UUID where nothing is connected; the
-        // library reads the connected flow from IS-05, not from here.
-        std::string flow_def(std::string const& name, std::string const& domainId,
+        // library reads the connected flow from IS-05, not from here. Every
+        // domain id listed is one a controller may connect the Receiver in.
+        std::string flow_def(std::string const& name, std::vector<std::string> const& domainIds,
             std::string const& flowId, int w, int h)
         {
+            std::string ids;
+            for (auto const& id : domainIds) ids += (ids.empty() ? "\"" : ",\"") + id + "\"";
             std::ostringstream o;
             o << "{\"id\":\"" << (flowId.empty() ? "00000000-0000-0000-0000-000000000000" : flowId) << "\","
               << "\"label\":\"" << name << "\","
               << "\"description\":\"compositor tile\","
               << "\"tags\":{"
               << "\"urn:x-nvnmos:tag:name\":[\"" << name << "\"],"
-              << "\"urn:x-nvnmos:tag:mxl-domain-id\":[\"" << domainId << "\"]},"
+              << "\"urn:x-nvnmos:tag:mxl-domain-id\":[" << ids << "]},"
               << "\"format\":\"urn:x-nmos:format:video\","
               << "\"media_type\":\"video/v210\","
               << "\"grain_rate\":{\"numerator\":30000,\"denominator\":1001},"
@@ -71,16 +75,30 @@ namespace nmos_node
             for (std::size_t i = 0; i < node->names.size(); ++i)
             {
                 if (node->names[i] != name) continue;
-                std::string flow;
+                nmos_slots::Source source;
                 if (transportFile != nullptr)
                 {
                     auto id = nmos_domain::flow_id_from_flow_def(transportFile);
+                    auto domain = nmos_domain::domain_id_from_flow_def(transportFile);
+                    // IS-05 accepts only the domains this Node lists, and the
+                    // first when a controller leaves the choice to it.
+                    auto const& domainId = domain ? *domain : node->domains.front().id;
+                    source.domain = nmos_domain::path_of(node->domains, domainId);
+                    if (source.domain.empty())
+                    {
+                        g_printerr("nmos: %s connected in domain %s, which is not one this node reads\n",
+                            name, domainId.c_str());
+                        node->slots->set(i, {});
+                        return false;
+                    }
                     // Enabled with no flow named is a controller parking the
                     // Receiver: nothing to show, which is a cleared tile.
-                    if (id) flow = *id;
+                    if (id) source.flow = *id;
+                    else source.domain.clear();
                 }
-                node->slots->set(i, flow);
-                g_print("nmos: %s -> %s\n", name, flow.empty() ? "(none)" : flow.c_str());
+                node->slots->set(i, source);
+                g_print("nmos: %s -> %s%s%s\n", name, source.flow.empty() ? "(none)" : source.flow.c_str(),
+                    source.flow.empty() ? "" : " in ", source.domain.c_str());
                 return true;
             }
             g_printerr("nmos: activation for unknown receiver %s\n", name);
@@ -96,20 +114,23 @@ namespace nmos_node
 
     NodePtr start(Config const& cfg, nmos_slots::Slots& slots, std::string& error)
     {
-        auto domainId = nmos_domain::read_id(cfg.domainPath, error);
-        if (!domainId) return nullptr;
+        auto domains = nmos_domain::discover(cfg.domainPath, cfg.domainsDir, error);
+        if (domains.empty()) return nullptr;
         if (cfg.hostAddress.empty())
         {
             error = "no host address to advertise the Node API at";
             return nullptr;
         }
+        std::vector<std::string> domainIds;
+        for (auto const& d : domains) domainIds.push_back(d.id);
 
         NodePtr node{new Node{}};
         node->slots = &slots;
+        node->domains = domains;
         for (std::size_t i = 0; i < slots.size(); ++i)
         {
             node->names.push_back(receiver_name(i));
-            node->flowDefs.push_back(flow_def(node->names.back(), *domainId, "",
+            node->flowDefs.push_back(flow_def(node->names.back(), domainIds, "",
                 cfg.frameWidth, cfg.frameHeight));
         }
 
@@ -168,17 +189,23 @@ namespace nmos_node
         // Node says so rather than presenting them as idle.
         for (std::size_t i = 0; i < slots.size(); ++i)
         {
-            auto flow = slots.get(i);
-            if (flow.empty()) continue;
-            auto def = flow_def(node->names[i], *domainId, flow, cfg.frameWidth, cfg.frameHeight);
+            auto source = slots.get(i);
+            if (source.flow.empty()) continue;
+            std::string domainId;
+            for (auto const& d : domains)
+                if (d.path == source.domain) domainId = d.id;
+            if (domainId.empty()) continue;
+            auto def = flow_def(node->names[i], {domainId}, source.flow, cfg.frameWidth, cfg.frameHeight);
             if (!nmos_connection_activate(&node->server, NVNMOS_SIDE_RECEIVER,
                     node->names[i].c_str(), def.c_str()))
                 g_printerr("nmos: could not report %s as showing %s\n",
-                    node->names[i].c_str(), flow.c_str());
+                    node->names[i].c_str(), source.flow.c_str());
         }
 
-        g_print("nmos: node up at %s:%u, %zu receivers in domain %s\n",
-            cfg.hostAddress.c_str(), cfg.httpPort, slots.size(), domainId->c_str());
+        std::string listed;
+        for (auto const& d : domains) listed += (listed.empty() ? "" : ", ") + d.id + " (" + d.path + ")";
+        g_print("nmos: node up at %s:%u, %zu receivers in domains %s\n",
+            cfg.hostAddress.c_str(), cfg.httpPort, slots.size(), listed.c_str());
         return node;
     }
 

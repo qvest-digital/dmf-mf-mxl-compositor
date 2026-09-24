@@ -1,0 +1,52 @@
+diff --git a/src/nvnmos_impl.cpp b/src/nvnmos_impl.cpp
+index aea2970..419c956 100644
+--- a/src/nvnmos_impl.cpp
++++ b/src/nvnmos_impl.cpp
+@@ -206,6 +206,8 @@ namespace nvnmos
+         // extract the MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
+         // returns empty when application-resolved (tag absent, empty array, or empty string)
+         utility::string_t get_mxl_flow_def_domain_id(const web::json::value& flow_def);
++        // extract every MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag
++        std::vector<utility::string_t> get_mxl_flow_def_domain_ids(const web::json::value& flow_def);
+         // resolve IS-05 mxl_domain_id "auto" from constraint: enum front or null
+         web::json::value resolve_mxl_domain_id(const web::json::value& constraint);
+         // resolve IS-05 mxl_flow_id "auto" from constraint: enum front or a new UUID
+@@ -845,6 +847,18 @@ namespace nvnmos
+ 
+         auto connection_receiver = nmos::make_connection_mxl_receiver(receiver_id, mxl_domain_id);
+ 
++        // a receiver able to read from more than one domain lists them all, so
++        // a controller may connect it to a flow in any of them and IS-05 refuses
++        // any other; the first stays the one "auto" resolves to
++        const auto mxl_domain_ids = impl::get_mxl_flow_def_domain_ids(flow_def);
++        if (mxl_domain_ids.size() > 1)
++        {
++            auto domain_enum = value::array();
++            for (const auto& id : mxl_domain_ids) web::json::push_back(domain_enum, value::string(id));
++            connection_receiver.data[nmos::fields::endpoint_constraints][0][nmos::fields::mxl_domain_id]
++                = value_of({ { nmos::fields::constraint_enum, domain_enum } });
++        }
++
+         impl::resolve_auto(receiver, connection_receiver, connection_receiver.data[nmos::fields::endpoint_active][nmos::fields::transport_params]);
+ 
+         // label and description are required (per IS-04 v1.3); let the accessors propagate
+@@ -2311,6 +2325,19 @@ namespace nvnmos
+             return get_mxl_flow_def_tag(flow_def, nvnmos::fields::mxl_domain_id);
+         }
+ 
++        // extract every MXL domain id from the urn:x-nvnmos:tag:mxl-domain-id tag;
++        // non-string and empty entries are skipped
++        std::vector<utility::string_t> get_mxl_flow_def_domain_ids(const web::json::value& flow_def)
++        {
++            std::vector<utility::string_t> ids;
++            if (!flow_def.has_object_field(nmos::fields::tags)) return ids;
++            for (const auto& value : nvnmos::fields::mxl_domain_id(flow_def.at(nmos::fields::tags)).as_array())
++            {
++                if (value.is_string() && !value.as_string().empty()) ids.push_back(value.as_string());
++            }
++            return ids;
++        }
++
+         // resolve IS-05 mxl_domain_id "auto" from constraint: enum front or null
+         web::json::value resolve_mxl_domain_id(const web::json::value& constraint)
+         {

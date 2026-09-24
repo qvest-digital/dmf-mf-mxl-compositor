@@ -2,8 +2,9 @@
 # and the AMWA NMOS Testing Tool, on one fixed-address network so the Node can
 # be told the address it is reached at. run.sh drives it.
 #
-# The MXL domain is a directory on the host's /dev/shm, which is tmpfs as
-# libmxl requires, holding only the domain_def.json the platform would write.
+# The MXL runtime root is a directory on the host's /dev/shm, which is tmpfs
+# as libmxl requires, holding two domains with only the domain_def.json the
+# platform would write.
 # run.sh creates it; a docker tmpfs volume would not do, because every
 # container mounting one gets a tmpfs of its own. No flow is written into it: the
 # suites test what the Node publishes and how it answers IS-05, and a tile
@@ -46,10 +47,10 @@ services:
       lane:
         ipv4_address: 172.30.99.20
     volumes:
-      - ${DOMAIN_DIR:?run.sh creates the domain directory}:/domain
+      - ${MXL_ROOT:?run.sh creates the runtime root}:/run/mxl
     environment:
-      MXL_DOMAIN: /domain
-      MXL_TILES: "2"
+      MXL_DOMAIN: /run/mxl/domain
+      MXL_TILES: "4"
       MXL_COMPOSITE_OUT: rtsp://172.30.99.11:8554/composite
       MXL_FRAME_WIDTH: "1280"
       MXL_FRAME_HEIGHT: "720"
