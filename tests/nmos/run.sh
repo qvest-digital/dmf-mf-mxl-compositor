@@ -46,10 +46,26 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 
+# Every Connection API href the Node advertises has to be reachable at the
+# address it was given. A controller tries the hrefs in order, and a pod's own
+# host name does not resolve anywhere outside it -- a controller that stops at
+# the first unresolvable one cannot connect anything.
+hrefs=$(docker compose exec -T registry sh -c \
+    "curl -s http://127.0.0.1:8010/x-nmos/query/v1.3/devices/" 2>/dev/null \
+  | grep -oE '"href":"http://[^"]*/x-nmos/connection/[^"]*"' | sort -u)
+if [ -z "$hrefs" ] || grep -v "http://$NODE:" <<<"$hrefs" >/dev/null; then
+  echo "FAIL advertised hrefs"
+  sed 's/^/    /' <<<"${hrefs:-(none)}"
+  hrefs_rc=1
+else
+  echo "PASS advertised hrefs"
+  hrefs_rc=0
+fi
+
 suites=("$@")
 [ ${#suites[@]} -gt 0 ] || suites=(IS-04-01 IS-05-01 IS-05-02 BCP-007-03-01)
 
-rc=0
+rc=$hrefs_rc
 for suite in "${suites[@]}"; do
   case "$suite" in
     IS-04-01)      args=(--host "$NODE" --port "$PORT" --version v1.3) ;;
