@@ -137,6 +137,12 @@ namespace nmos_node
         services.system_port = cfg.systemPort;
 
         NvNmosNodeConfig nc{};
+        // The address the Node was given, as its host name too. NvNmos
+        // advertises every Connection API under the host name as well as the
+        // addresses, host name first, and left unset that is the pod's own
+        // name, which resolves nowhere outside it: a controller that tries
+        // the hrefs in order stops at the first one it cannot resolve.
+        nc.host_name = cfg.hostAddress.c_str();
         nc.host_addresses = hostAddresses;
         nc.num_host_addresses = 1;
         nc.http_port = cfg.httpPort;
