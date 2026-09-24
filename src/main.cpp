@@ -446,6 +446,7 @@ namespace
         // at its native size with no scaler, so such a flow is refused and the
         // tile stays black until something else is connected.
         std::string refused;
+        std::uint64_t instanceFailures = 0;
 
         while (!g_exit.load(std::memory_order_relaxed))
         {
@@ -463,25 +464,28 @@ namespace
                     want.flow.empty() ? "(none)" : want.flow.c_str(), want.domain.c_str(),
                     w->flowId.empty() ? "(none)" : w->flowId.c_str());
                 w->flowId = std::move(want.flow);
-                if (!w->flowId.empty() && want.domain != w->domain)
+                if (want.domain != w->domain)
                 {
-                    auto& inst = w->instances[want.domain];
-                    if (inst == nullptr) inst = ::mxlCreateInstance(want.domain.c_str(), "");
-                    if (inst == nullptr)
-                    {
-                        // Drawn black, as a flow that is not there yet is;
-                        // the next connection retries the open.
-                        g_printerr("[%zu] mxlCreateInstance failed for %s\n", w->index, want.domain.c_str());
-                        w->instances.erase(want.domain);
-                        w->flowId.clear();
-                    }
-                    w->instance = inst;
+                    auto it = w->instances.find(want.domain);
+                    w->instance = it == w->instances.end() ? nullptr : it->second;
                 }
                 w->domain = std::move(want.domain);
                 refused.clear();
                 lastHead = 0;
                 stallTicks = 0;
                 lastShownIndex = -1;
+            }
+
+            // The domain's instance, opened on the first flow read from it and
+            // kept: libmxl reads a domain's options when it opens one. A
+            // failed open is retried each tick, drawn black meanwhile, as a
+            // flow that is not there yet is.
+            if (!w->flowId.empty() && w->instance == nullptr)
+            {
+                w->instance = ::mxlCreateInstance(w->domain.c_str(), "");
+                if (w->instance != nullptr) w->instances[w->domain] = w->instance;
+                else if (++instanceFailures % 300 == 1)
+                    g_printerr("[%zu] mxlCreateInstance failed for %s\n", w->index, w->domain.c_str());
             }
 
             if (w->flowId.empty() || w->flowId == refused || w->instance == nullptr)

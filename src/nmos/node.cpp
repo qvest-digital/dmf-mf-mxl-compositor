@@ -194,7 +194,12 @@ namespace nmos_node
             std::string domainId;
             for (auto const& d : domains)
                 if (d.path == source.domain) domainId = d.id;
-            if (domainId.empty()) continue;
+            if (domainId.empty())
+            {
+                g_printerr("nmos: %s shows %s in %s, which has no identity, so it is not reported\n",
+                    node->names[i].c_str(), source.flow.c_str(), source.domain.c_str());
+                continue;
+            }
             auto def = flow_def(node->names[i], {domainId}, source.flow, cfg.frameWidth, cfg.frameHeight);
             if (!nmos_connection_activate(&node->server, NVNMOS_SIDE_RECEIVER,
                     node->names[i].c_str(), def.c_str()))
