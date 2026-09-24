@@ -47,8 +47,14 @@ jobs:
         run: |
           ref=$(sed -n 's/^ARG NVNMOS_REF=//p' Dockerfile)
           [[ -n "$ref" ]] || { echo "no ARG NVNMOS_REF in Dockerfile" >&2; exit 1; }
+          # The tag names the patches, so a changed patch is a new image. A
+          # Dockerfile naming another hash would build against a stale one.
+          patches=$(sed -n 's/^ARG NVNMOS_PATCHES=//p' Dockerfile)
+          want=$(sha256sum docker/nvnmos/patches/*.patch | sha256sum | cut -c1-8)
+          [[ "$patches" == "$want" ]] || {
+            echo "ARG NVNMOS_PATCHES=$patches in Dockerfile, but the patches hash to $want" >&2; exit 1; }
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "image=${{ env.IMAGE }}/nvnmos:$ref" >> "$GITHUB_OUTPUT"
+          echo "image=${{ env.IMAGE }}/nvnmos:$ref-$patches" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3

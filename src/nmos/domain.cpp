@@ -1,6 +1,8 @@
 #include "nmos/domain.hpp"
 
+#include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -94,5 +96,68 @@ namespace nmos_domain
         auto id = string_field(json, "id");
         if (!id || !is_uuid(*id)) return std::nullopt;
         return id;
+    }
+
+    std::optional<std::string> domain_id_from_flow_def(std::string const& json)
+    {
+        // The tag key is unique to it, so the first string after its array
+        // opens is the value; no JSON value the library writes contains it.
+        static std::string const key = "\"urn:x-nvnmos:tag:mxl-domain-id\"";
+        auto p = json.find(key);
+        if (p == std::string::npos) return std::nullopt;
+        p = json.find_first_not_of(" \t\r\n", p + key.size());
+        if (p == std::string::npos || json[p] != ':') return std::nullopt;
+        p = json.find_first_not_of(" \t\r\n", p + 1);
+        if (p == std::string::npos || json[p] != '[') return std::nullopt;
+        p = json.find_first_not_of(" \t\r\n", p + 1);
+        if (p == std::string::npos || json[p] != '"') return std::nullopt;
+        auto const end = json.find('"', p + 1);
+        if (end == std::string::npos) return std::nullopt;
+        auto id = json.substr(p + 1, end - p - 1);
+        if (!is_uuid(id)) return std::nullopt;
+        return id;
+    }
+
+    std::vector<Domain> discover(std::string const& primaryPath, std::string const& domainsDir,
+        std::string& error)
+    {
+        std::vector<Domain> out;
+        std::string reasons;
+        std::string err;
+        if (!primaryPath.empty())
+        {
+            if (auto id = read_id(primaryPath, err)) out.push_back({*id, primaryPath});
+            else reasons += err;
+        }
+        std::vector<Domain> more;
+        std::error_code ec;
+        if (!domainsDir.empty() && std::filesystem::is_directory(domainsDir, ec))
+        {
+            for (auto const& entry : std::filesystem::directory_iterator{domainsDir, ec})
+            {
+                if (!entry.is_directory(ec)) continue;
+                auto const name = entry.path().filename().string();
+                auto id = read_id(entry.path().string(), err);
+                if (!id || *id != name) continue;
+                bool const dup = std::any_of(out.begin(), out.end(),
+                    [&](Domain const& d) { return d.id == *id; });
+                if (!dup) more.push_back({*id, entry.path().string()});
+            }
+        }
+        std::sort(more.begin(), more.end(), [](Domain const& a, Domain const& b) { return a.id < b.id; });
+        out.insert(out.end(), more.begin(), more.end());
+        if (out.empty())
+        {
+            error = "no MXL domain with an identity: " + (reasons.empty() ? std::string{"none found"} : reasons) +
+                (domainsDir.empty() ? "" : "; nor any under " + domainsDir);
+        }
+        return out;
+    }
+
+    std::string path_of(std::vector<Domain> const& domains, std::string const& id)
+    {
+        for (auto const& d : domains)
+            if (d.id == id) return d.path;
+        return {};
     }
 }

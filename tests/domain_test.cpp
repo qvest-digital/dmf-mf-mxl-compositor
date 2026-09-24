@@ -64,12 +64,55 @@ int main()
     check(flow && *flow == "11111111-2222-4333-8444-555555555555", "the connected flow id is read");
     check(!nmos_domain::flow_id_from_flow_def(R"({"label":"x"})"), "no id is no flow");
 
-    // A slot holds the flow a tile shows; unknown slots are refused.
-    nmos_slots::Slots slots{{"a", ""}};
-    check(slots.get(0) == "a" && slots.get(1).empty(), "slots start from the configured flows");
-    check(slots.set(1, "b") && slots.get(1) == "b", "a slot takes a connected flow");
-    check(slots.set(0, "") && slots.get(0).empty(), "a slot is cleared on deactivation");
-    check(!slots.set(2, "c"), "a slot that does not exist is refused");
+    // A slot holds the flow a tile shows and the domain it is in; unknown
+    // slots are refused.
+    nmos_slots::Slots slots{{{"/run/mxl/domain", "a"}, {}}};
+    check(slots.get(0).flow == "a" && slots.get(1).flow.empty(), "slots start from the configured flows");
+    check(slots.set(1, {"/d2", "b"}) && slots.get(1).flow == "b" && slots.get(1).domain == "/d2",
+        "a slot takes a connected flow and its domain");
+    check(slots.get(1) != nmos_slots::Source{"/run/mxl/domain", "b"},
+        "the same flow id in another domain is another source");
+    check(slots.set(0, {}) && slots.get(0).flow.empty(), "a slot is cleared on deactivation");
+    check(!slots.set(2, {"/d", "c"}), "a slot that does not exist is refused");
+
+    // The domain a controller connected in arrives as the flow definition's
+    // mxl-domain-id tag.
+    auto dom = nmos_domain::domain_id_from_flow_def(
+        R"({"id":"11111111-2222-4333-8444-555555555555","tags":{"urn:x-nvnmos:tag:name":["tile-0"],)"
+        R"("urn:x-nvnmos:tag:mxl-domain-id": [ "fec11c1b-9fab-4275-ab2c-ef676fa2e081" ]}})");
+    check(dom && *dom == "fec11c1b-9fab-4275-ab2c-ef676fa2e081", "the connected domain id is read");
+    check(!nmos_domain::domain_id_from_flow_def(R"({"tags":{}})"), "no tag is no domain");
+    check(!nmos_domain::domain_id_from_flow_def(
+        R"({"tags":{"urn:x-nvnmos:tag:mxl-domain-id":["studio"]}})"), "a domain name is not an id");
+
+    // Every domain readable here is found: the primary first, then each
+    // domains/<id> whose file carries that id. One whose file names another
+    // id is left out, since reading it as that domain would show another
+    // domain's flow of the same id.
+    {
+        auto root = std::filesystem::temp_directory_path() / ("mxl-root-" + std::to_string(std::rand()));
+        auto put = [](std::filesystem::path const& dir, std::string const& id) {
+            std::filesystem::create_directories(dir);
+            std::ofstream{dir / "domain_def.json"} << R"({"id":")" << id << R"("})";
+        };
+        std::string const a = "462050c6-eea6-475b-a1f6-cb3ef2a6cce5";
+        std::string const b = "fec11c1b-9fab-4275-ab2c-ef676fa2e081";
+        std::string const c = "0a000000-0000-4000-8000-000000000001";
+        put(root / "domain", a);
+        put(root / "domains" / b, b);
+        put(root / "domains" / c, a);
+        std::string e;
+        auto found = nmos_domain::discover((root / "domain").string(), (root / "domains").string(), e);
+        check(found.size() == 2, "the primary and one matching domain are found");
+        check(found.size() == 2 && found[0].id == a && found[1].id == b, "the primary is listed first");
+        check(nmos_domain::path_of(found, b) == (root / "domains" / b).string(), "an id maps to its directory");
+        check(nmos_domain::path_of(found, c).empty(), "a mismatched directory is not a domain");
+
+        auto none = nmos_domain::discover((root / "absent").string(), (root / "absent-too").string(), e);
+        check(none.empty() && !e.empty(), "no domain at all is an error with a reason");
+        auto onlyMore = nmos_domain::discover("", (root / "domains").string(), e);
+        check(onlyMore.size() == 1 && onlyMore[0].id == b, "domains alone, with no primary, are enough");
+    }
 
     if (failures == 0) std::printf("ok\n");
     return failures == 0 ? 0 : 1;

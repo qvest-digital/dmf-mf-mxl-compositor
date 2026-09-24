@@ -27,10 +27,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pip install conan~=2.2 \
     && conan profile detect
 
-# The commit pins libnvnmos, and its conan.lock pins every dependency.
+# The commit pins libnvnmos, and its conan.lock pins every dependency. The
+# patches change NvNmos, not what it builds against.
+COPY patches /patches
 RUN test -n "${NVNMOS_REF}" \
  && git clone https://github.com/NVIDIA/nvnmos.git /nvnmos \
- && git -C /nvnmos checkout --quiet "${NVNMOS_REF}"
+ && git -C /nvnmos checkout --quiet "${NVNMOS_REF}" \
+ && for p in /patches/*.patch; do git -C /nvnmos apply --verbose "$p"; done
 WORKDIR /nvnmos
 RUN conan install src \
         --settings:all build_type=Release \

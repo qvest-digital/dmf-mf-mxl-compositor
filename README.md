@@ -23,6 +23,7 @@ The encoded bitstream goes to `rtspclientsink`.
 |---|---|---|
 | `MXL_FLOW_IDS` | none, required | Space-separated flow UUIDs, one per tile |
 | `MXL_DOMAIN` | `/domain` | MXL domain directory to read from |
+| `MXL_DOMAINS_DIR` | `domains` beside `MXL_DOMAIN` | Directory of further domains, one per id, a tile can be connected in |
 | `MXL_COMPOSITE_OUT` | `rtsp://mediamtx:8554/composite` | RTSP publish target |
 | `MXL_FRAME_WIDTH` | `1920` | Tile width, must match the flow definition |
 | `MXL_FRAME_HEIGHT` | `1080` | Tile height, must match the flow definition |
@@ -52,11 +53,15 @@ flow, leaves the tile black. A tile started from `MXL_FLOW_IDS` is reported as
 already connected to that flow.
 
 The Receivers are served under IS-05 v1.2, the first version that knows the
-MXL transport. Each names the domain its reader opens in `mxl_domain_id`, read
-from `<MXL_DOMAIN>/domain_def.json` as BCP-007-03 lays it out, and refuses any
-other. The Node is not started until that file yields a UUID: an MXL Receiver
-with no domain to name is one no controller can route to. It retries every ten
-seconds and logs why; the mosaic runs meanwhile.
+MXL transport. Each lists every domain it can read in its `mxl_domain_id`
+constraint and refuses any other: the domain `MXL_DOMAIN` names, then each
+directory under `MXL_DOMAINS_DIR` named by a domain id whose `domain_def.json`
+carries that id, as BCP-007-03 lays the file out. A tile reads the connected
+flow in the domain it was connected in. The list is read when the Node starts,
+so a domain created later is connectable after a restart. The Node is not
+started until at least one domain yields a UUID: an MXL Receiver with no domain
+to name is one no controller can route to. It retries every ten seconds and
+logs why; the mosaic runs meanwhile.
 
 A flow whose frame size is not the tile's is not shown, because tiles are
 composited at their native size without scaling. The tile stays black and the

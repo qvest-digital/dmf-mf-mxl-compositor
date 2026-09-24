@@ -16,9 +16,14 @@ namespace nmos_node
 {
     struct Config
     {
-        // Required. The MXL domain directory; its domain_def.json names the
-        // domain every Receiver advertises.
+        // The primary MXL domain directory, listed first where its
+        // domain_def.json carries an identity.
         std::string domainPath;
+        // The directory holding one domain per id, each listed where its
+        // domain_def.json carries that id. Domains appearing after start are
+        // not listed until a restart: a Receiver's constraints are fixed when
+        // it is registered.
+        std::string domainsDir;
         // Required. The address this Node's APIs are reached at, which the
         // registry hands to controllers.
         std::string hostAddress;
@@ -54,10 +59,11 @@ namespace nmos_node
     };
     using NodePtr = std::unique_ptr<Node, NodeDeleter>;
 
-    // start creates the Node, registers one Receiver per slot and marks the
-    // Receivers of slots that already name a flow as active, so an instance
-    // configured with MXL_FLOW_IDS reports what it shows. Fails, with the
-    // reason in error, where the domain has no identity: an MXL Receiver
-    // whose domain is unconstrained is one no controller can route to.
+    // start creates the Node, registers one Receiver per slot, each able to
+    // read from every domain found, and marks the Receivers of slots that
+    // already name a flow as active, so an instance configured with
+    // MXL_FLOW_IDS reports what it shows. Fails, with the reason in error,
+    // where no domain has an identity: an MXL Receiver whose domain is
+    // unconstrained is one no controller can route to.
     NodePtr start(Config const& cfg, nmos_slots::Slots& slots, std::string& error);
 }
