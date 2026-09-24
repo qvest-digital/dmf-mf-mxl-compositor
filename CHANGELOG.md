@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.0-rc.9](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.8...v1.0.0-rc.9) (2026-09-23)
+
+
+### Features
+
+* connect tiles over NMOS as BCP-007-03 MXL receivers ([849a311](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/849a311f7b200cc8165a901ec79159a3537b5895))
+
+
+### Bug Fixes
+
+* show a switched tile black until its flow arrives, and refuse flows that are not v210 video ([849a311](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/849a311f7b200cc8165a901ec79159a3537b5895))
+
+
+### Build System
+
+* publish libnvnmos as its own pinned image, built one run at a time with its dependency layer cached ([849a311](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/849a311f7b200cc8165a901ec79159a3537b5895))
+
 ## [1.0.0-rc.8](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.7...v1.0.0-rc.8) (2026-08-27)
 
 
