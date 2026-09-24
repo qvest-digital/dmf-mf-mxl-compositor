@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.10](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.9...v1.0.0-rc.10) (2026-09-24)
+
+
+### Bug Fixes
+
+* advertise the Node at the address it was given ([#20](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/20)) ([cde0c04](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/cde0c0479a0a0439fbaa7dd4fc7250f2f50cf6ac))
+
 ## [1.0.0-rc.9](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.8...v1.0.0-rc.9) (2026-09-23)
 
 
