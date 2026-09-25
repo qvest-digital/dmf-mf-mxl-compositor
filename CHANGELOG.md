@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.11](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.10...v1.0.0-rc.11) (2026-09-25)
+
+
+### Features
+
+* connect a tile to a flow in any MXL domain on the node ([#22](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/22)) ([97a09ef](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/97a09ef1bdd278b854d2170513dacee3df838a1b))
+
+
+### Build System
+
+* survive a slow dependency host when building libnvnmos ([#24](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/24)) ([3a078de](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/3a078de9b7d3f133968dfcc9b6bd794b962fb93e))
+
 ## [1.0.0-rc.10](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.9...v1.0.0-rc.10) (2026-09-24)
 
 
