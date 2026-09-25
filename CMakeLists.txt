@@ -39,3 +39,7 @@ add_test(NAME domain_test COMMAND domain_test)
 add_executable(connections_test tests/connections_test.cpp)
 target_link_libraries(connections_test PRIVATE nmos-support pthread)
 add_test(NAME connections_test COMMAND connections_test)
+
+add_executable(next_grain_test tests/next_grain_test.cpp)
+target_include_directories(next_grain_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME next_grain_test COMMAND next_grain_test)
