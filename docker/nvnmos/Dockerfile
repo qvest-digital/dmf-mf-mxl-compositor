@@ -25,22 +25,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     && pip install conan~=2.2 \
-    && conan profile detect
+    && conan profile detect \
+    && printf '%s\n' 'core.download:retry=8' 'core.download:retry_wait=15' \
+        >> "$(conan config home)/global.conf"
+# Every dependency is compiled from source fetched from its upstream host,
+# and conan's default of two retries five seconds apart lost a build to one
+# host being unreachable for ten seconds.
 
 # The commit pins libnvnmos, and its conan.lock pins every dependency. The
-# patches change NvNmos, not what it builds against.
-COPY patches /patches
+# dependencies are installed before the patches are applied, so that layer is
+# cached across a patch change: the patches change NvNmos, not what it builds
+# against.
 RUN test -n "${NVNMOS_REF}" \
  && git clone https://github.com/NVIDIA/nvnmos.git /nvnmos \
- && git -C /nvnmos checkout --quiet "${NVNMOS_REF}" \
- && for p in /patches/*.patch; do git -C /nvnmos apply --verbose "$p"; done
+ && git -C /nvnmos checkout --quiet "${NVNMOS_REF}"
 WORKDIR /nvnmos
 RUN conan install src \
         --settings:all build_type=Release \
         --build=missing \
         --output-folder=src/conan \
         --lockfile=src/conan.lock \
-        -o '*:shared=False' \
+        -o '*:shared=False'
+COPY patches /patches
+RUN for p in /patches/*.patch; do git apply --verbose "$p"; done \
  && cmake -B build \
         -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
         -DCMAKE_BUILD_TYPE=Release \
