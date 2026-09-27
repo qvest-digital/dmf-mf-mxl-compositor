@@ -37,13 +37,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgstreamer1.0-dev \
         libgstreamer-plugins-base1.0-dev \
         libglib2.0-dev \
+        libcurl4-openssl-dev \
+        nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY CMakeLists.txt /src/
 COPY vendor /src/vendor/
 COPY src /src/src/
-COPY tests/domain_test.cpp /src/tests/
+COPY tests/domain_test.cpp tests/connections_test.cpp /src/tests/
 COPY --from=nvnmos /opt/nvnmos /opt/nvnmos
 
 # The builder image ships libmxl under /opt/libmxl/lib without a multiarch
@@ -72,6 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-ugly \
         gstreamer1.0-libav \
         gstreamer1.0-rtsp \
+        libcurl4t64 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/mxl-compositor/bin/mxl-multi-compositor /usr/bin/

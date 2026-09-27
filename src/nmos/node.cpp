@@ -1,13 +1,24 @@
 #include "nmos/node.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 #include <glib.h>
 #include <nvnmos.h>
 
+#include "nmos/configmap.hpp"
+#include "nmos/connections.hpp"
 #include "nmos/domain.hpp"
+#include "nmos/http.hpp"
+#include "nmos/persist.hpp"
 
 namespace nmos_node
 {
@@ -19,6 +30,9 @@ namespace nmos_node
         std::vector<nmos_domain::Domain> domains;
         std::vector<std::string> names;
         std::vector<std::string> flowDefs;
+        // The Connection API this process serves, as reached from inside it.
+        std::string receiversUrl;
+        std::unique_ptr<nmos_persist::Persister> persister;
     };
 
     namespace
@@ -89,6 +103,7 @@ namespace nmos_node
                         g_printerr("nmos: %s connected in domain %s, which is not one this node reads\n",
                             name, domainId.c_str());
                         node->slots->set(i, {});
+                        if (node->persister) node->persister->mark(i);
                         return false;
                     }
                     // Enabled with no flow named is a controller parking the
@@ -99,15 +114,104 @@ namespace nmos_node
                 node->slots->set(i, source);
                 g_print("nmos: %s -> %s%s%s\n", name, source.flow.empty() ? "(none)" : source.flow.c_str(),
                     source.flow.empty() ? "" : " in ", source.domain.c_str());
+                if (node->persister) node->persister->mark(i);
                 return true;
             }
             g_printerr("nmos: activation for unknown receiver %s\n", name);
             return false;
         }
+
+        std::string receiver_id(Node const& node, std::size_t i)
+        {
+            char id[NVNMOS_ID_LEN] = {};
+            if (!nmos_get_receiver_id(&node.server, node.names[i].c_str(), id, sizeof id)) return {};
+            return id;
+        }
+
+        // active is a tile's IS-05 /active as the Connection API serves it,
+        // which, unlike the activation callback, names the Sender connected.
+        std::optional<std::string> active(Node const& node, std::size_t i)
+        {
+            auto id = receiver_id(node, i);
+            if (id.empty()) return std::nullopt;
+            nmos_http::Request req;
+            req.url = node.receiversUrl + id + "/active";
+            auto res = nmos_http::send(req);
+            if (res.status != 200) return std::nullopt;
+            return res.body;
+        }
+
+        // restore connects a tile as a controller would, through /staged, so
+        // /active and the IS-04 subscription carry the stored Sender as well
+        // as the flow, and the activation callback puts the flow on the tile.
+        // IS-05 refuses a domain this Node no longer reads; a flow that is
+        // gone is accepted, and the tile stays black until it appears.
+        bool restore(Node const& node, std::size_t i, nmos_connections::Connection const& c)
+        {
+            auto id = receiver_id(node, i);
+            nmos_http::Request req;
+            req.method = "PATCH";
+            req.url = node.receiversUrl + id + "/staged";
+            req.headers = {"Content-Type: application/json"};
+            req.body = nmos_connections::staged_patch(c);
+            auto res = id.empty() ? nmos_http::Response{0, {}, "no receiver id"} : nmos_http::send(req);
+            if (res.status == 200) return true;
+            g_printerr("nmos: could not restore %s to %s in %s: %s\n", node.names[i].c_str(),
+                c.flowId.c_str(), c.domainId.empty() ? "(auto)" : c.domainId.c_str(),
+                res.status == 0 ? res.error.c_str() : ("HTTP " + std::to_string(res.status) + " " + res.body).c_str());
+            return false;
+        }
+
+        // stored reads what the store holds for each tile: a connection, or
+        // nothing. A tile whose entry cannot be read is left out, and so is
+        // every tile where the store cannot be read within ten seconds, so
+        // startup is never held on it: those tiles start as configured, and
+        // their next activation is written whatever the store held. A 4xx
+        // other than 429 is not waited out, since retrying cannot fix it.
+        std::map<std::size_t, std::optional<nmos_connections::Connection>> stored(
+            nmos_configmap::ConfigMap const& store, std::vector<std::string> const& names,
+            std::function<bool()> const& stopping)
+        {
+            using clock = std::chrono::steady_clock;
+            auto const deadline = clock::now() + std::chrono::seconds(10);
+            std::map<std::string, std::string> data;
+            std::string err;
+            bool loaded = false;
+            for (int attempt = 1; !loaded && !(stopping && stopping()); ++attempt)
+            {
+                auto const left = std::chrono::duration_cast<std::chrono::seconds>(deadline - clock::now()).count();
+                if (left < 1) break;
+                long status = 0;
+                if ((loaded = store.load(data, std::min<long>(left, 5), status, err))) break;
+                g_printerr("nmos: cannot read stored connections (attempt %d): %s\n", attempt, err.c_str());
+                if (status >= 400 && status < 500 && status != 429) break;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            std::map<std::size_t, std::optional<nmos_connections::Connection>> out;
+            if (!loaded)
+            {
+                g_printerr("nmos: starting without stored connections\n");
+                return out;
+            }
+            for (std::size_t i = 0; i < names.size(); ++i)
+            {
+                auto it = data.find(names[i]);
+                if (it == data.end())
+                {
+                    out.emplace(i, std::nullopt);
+                    continue;
+                }
+                if (auto c = nmos_connections::from_active(it->second)) out.emplace(i, *c);
+                else g_printerr("nmos: stored connection of %s is not one: %s\n", names[i].c_str(), it->second.c_str());
+            }
+            return out;
+        }
     }
 
     void NodeDeleter::operator()(Node* node) const
     {
+        // Written out while the Connection API can still be read.
+        if (node->persister) node->persister->stop();
         destroy_nmos_node_server(&node->server);
         delete node;
     }
@@ -132,6 +236,23 @@ namespace nmos_node
             node->names.push_back(receiver_name(i));
             node->flowDefs.push_back(flow_def(node->names.back(), domainIds, "",
                 cfg.frameWidth, cfg.frameHeight));
+        }
+
+        // nmos-cpp listens on every address, and on its own Connection API
+        // port, 3215, where no HTTP port is given.
+        node->receiversUrl = "http://127.0.0.1:" + std::to_string(cfg.httpPort ? cfg.httpPort : 3215) +
+            "/x-nmos/connection/v1.2/single/receivers/";
+
+        std::map<std::size_t, std::optional<nmos_connections::Connection>> known;
+        if (!cfg.connectionsConfigMap.empty())
+        {
+            nmos_configmap::ConfigMap store{cfg.connectionsConfigMap};
+            known = stored(store, node->names, cfg.stopping);
+            nmos_persist::Io io;
+            Node* n = node.get();
+            io.readActive = [n](std::size_t i) { return active(*n, i); };
+            io.write = [store](std::string const& patch, std::string& error) { return store.patch(patch, error); };
+            node->persister = std::make_unique<nmos_persist::Persister>(std::move(io), node->names, known);
         }
 
         std::vector<NvNmosReceiverConfig> receivers(slots.size());
@@ -184,11 +305,20 @@ namespace nmos_node
             error = "the NMOS Node server did not start";
             return nullptr;
         }
+        if (node->persister) node->persister->start();
 
-        // Tiles given a flow by MXL_FLOW_IDS are showing it already, and the
-        // Node says so rather than presenting them as idle.
+        // A stored connection is the last one a controller made, so it takes
+        // the tile over MXL_FLOW_IDS. Tiles given a flow by MXL_FLOW_IDS are
+        // showing it already, and the Node says so rather than presenting
+        // them as idle.
         for (std::size_t i = 0; i < slots.size(); ++i)
         {
+            auto const r = known.find(i);
+            if (r != known.end() && r->second && restore(*node, i, *r->second))
+            {
+                g_print("nmos: %s restored to %s\n", node->names[i].c_str(), r->second->flowId.c_str());
+                continue;
+            }
             auto source = slots.get(i);
             if (source.flow.empty()) continue;
             std::string domainId;
