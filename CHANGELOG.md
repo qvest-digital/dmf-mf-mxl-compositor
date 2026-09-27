@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.12](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.11...v1.0.0-rc.12) (2026-09-27)
+
+
+### Features
+
+* **nmos:** keep tile connections across a restart ([#25](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/25)) ([b38dedc](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/b38dedc8724a8490fef227d1dd6afaae75a8dc97))
+
 ## [1.0.0-rc.11](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.10...v1.0.0-rc.11) (2026-09-25)
 
 
