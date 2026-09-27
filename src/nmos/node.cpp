@@ -133,12 +133,13 @@ namespace nmos_node
         std::optional<std::string> active(Node const& node, std::size_t i)
         {
             auto id = receiver_id(node, i);
-            if (id.empty()) return std::nullopt;
             nmos_http::Request req;
             req.url = node.receiversUrl + id + "/active";
-            auto res = nmos_http::send(req);
-            if (res.status != 200) return std::nullopt;
-            return res.body;
+            auto res = id.empty() ? nmos_http::Response{0, {}, "no receiver id"} : nmos_http::send(req);
+            if (res.status == 200) return res.body;
+            g_printerr("nmos: cannot read the /active of %s: %s\n", node.names[i].c_str(),
+                res.status == 0 ? res.error.c_str() : ("HTTP " + std::to_string(res.status)).c_str());
+            return std::nullopt;
         }
 
         // restore connects a tile as a controller would, through /staged, so

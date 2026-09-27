@@ -80,7 +80,8 @@ takes them.
 At startup the Node replays each stored connection against its own
 Connection API as an immediate `/staged` activation, so `/active` and the IS-04
 subscription name the same Sender as before and the tile reopens the flow. A
-stored connection takes the tile over `MXL_FLOW_IDS`. A flow that no longer
+stored connection takes the tile over `MXL_FLOW_IDS`; a disconnect removes it, so
+a tile `MXL_FLOW_IDS` names shows that flow again after the next start. A flow that no longer
 exists is connected anyway and the tile stays black until it appears; a domain
 the Node no longer reads is refused by IS-05, logged, and the tile starts as
 configured. A ConfigMap that cannot be read within ten seconds, or that
