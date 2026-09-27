@@ -67,6 +67,32 @@ A flow whose frame size is not the tile's is not shown, because tiles are
 composited at their native size without scaling. The tile stays black and the
 reason is logged.
 
+### Connections across a restart
+
+IS-05 keeps a Receiver's connection in memory. With
+`NMOS_CONNECTIONS_CONFIGMAP` naming a ConfigMap in the pod's namespace, the
+compositor stores each tile's connection there, one key per Receiver name, as
+the `sender_id`, `master_enable` and `transport_params` of its `/active`. A
+controller's activation replaces the stored value and a disconnect removes it.
+Writes happen off the activation path and are retried until the API server
+takes them.
+
+At startup the Node replays each stored connection against its own
+Connection API as an immediate `/staged` activation, so `/active` and the IS-04
+subscription name the same Sender as before and the tile reopens the flow. A
+stored connection takes the tile over `MXL_FLOW_IDS`; a disconnect removes it, so
+a tile `MXL_FLOW_IDS` names shows that flow again after the next start. A flow that no longer
+exists is connected anyway and the tile stays black until it appears; a domain
+the Node no longer reads is refused by IS-05, logged, and the tile starts as
+configured. A ConfigMap that cannot be read within ten seconds, or that
+answers with a client error such as 403 or 404, is given up on for that start:
+the tiles start as configured and later activations are still stored.
+
+The ConfigMap must exist. The pod's service account needs `get` and `patch`
+on it; the API server, namespace, token and CA are the ones every pod is given
+(`KUBERNETES_SERVICE_HOST`, `KUBERNETES_SERVICE_PORT` and
+`/var/run/secrets/kubernetes.io/serviceaccount`).
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `NMOS_HOST_ADDRESS` | unset, NMOS off | Address the Node APIs are reached at |
@@ -79,6 +105,7 @@ reason is logged.
 | `NMOS_SYSTEM_HOST` | `NMOS_REGISTRY_HOST` | Fixed IS-09 System API |
 | `NMOS_SYSTEM_PORT` | `NMOS_REGISTRY_PORT` | Its port |
 | `NMOS_DNS_DOMAIN` | from resolv.conf | DNS-SD domain to browse for a registry |
+| `NMOS_CONNECTIONS_CONFIGMAP` | unset, not kept | ConfigMap that keeps tile connections across restarts |
 
 The Node is [NvNmos](https://github.com/NVIDIA/nvnmos), NVIDIA's C API over
 nmos-cpp, pinned by commit in the Dockerfile's `NVNMOS_REF`.
@@ -87,10 +114,12 @@ nmos-cpp, pinned by commit in the Dockerfile's `NVNMOS_REF`.
 
     tests/nmos/run.sh
 
-stands up an nmos-cpp registry and the compositor as a Node with Docker Compose
-and runs the AMWA NMOS Testing Tool's IS-04-01, IS-05-01, IS-05-02 and
-BCP-007-03-01 suites against it. A warning is reported but does not fail a
-suite. It needs `/dev/shm` for the MXL domain.
+stands up an nmos-cpp registry and the compositor as a Node with Docker Compose,
+checks that a connection is stored and restored across a restart of the
+compositor against a stand-in for the Kubernetes API that serves the one
+ConfigMap, and runs the AMWA NMOS Testing Tool's IS-04-01, IS-05-01, IS-05-02
+and BCP-007-03-01 suites against it. A warning is reported but does not fail a
+suite. It needs `/dev/shm` for the MXL domain, and curl, jq and openssl.
 
 ## Building
 

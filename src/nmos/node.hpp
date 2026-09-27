@@ -3,10 +3,13 @@
 //
 // A controller connects a tile by activating its Receiver with an mxl_flow_id;
 // the tile's slot takes that flow and the reader worker reopens on it.
-// Deactivating a Receiver clears the slot and the tile goes black.
+// Deactivating a Receiver clears the slot and the tile goes black. With a
+// connections ConfigMap, each tile's connection is kept there and replayed
+// when the Node starts again.
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -48,6 +51,11 @@ namespace nmos_node
         // Tile geometry and rate, stated in each Receiver's caps.
         int frameWidth{1920};
         int frameHeight{1080};
+        // A ConfigMap in the pod's own namespace that keeps each tile's
+        // connection across restarts. Empty keeps them in memory only.
+        std::string connectionsConfigMap;
+        // Reports a shutdown, so reading the ConfigMap stops waiting for it.
+        std::function<bool()> stopping;
     };
 
     class Node;
@@ -62,8 +70,10 @@ namespace nmos_node
     // start creates the Node, registers one Receiver per slot, each able to
     // read from every domain found, and marks the Receivers of slots that
     // already name a flow as active, so an instance configured with
-    // MXL_FLOW_IDS reports what it shows. Fails, with the reason in error,
-    // where no domain has an identity: an MXL Receiver whose domain is
-    // unconstrained is one no controller can route to.
+    // MXL_FLOW_IDS reports what it shows. With a connections ConfigMap, a
+    // tile stored there is connected as stored instead, and every later
+    // activation is written back. Fails, with the reason in error, where no
+    // domain has an identity: an MXL Receiver whose domain is unconstrained
+    // is one no controller can route to.
     NodePtr start(Config const& cfg, nmos_slots::Slots& slots, std::string& error);
 }

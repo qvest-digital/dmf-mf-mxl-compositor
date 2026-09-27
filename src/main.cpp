@@ -913,6 +913,8 @@ int main(int argc, char** argv)
             env_or("NMOS_SYSTEM_PORT", env_or("NMOS_REGISTRY_PORT", "0").c_str()).c_str()));
         nc.frameWidth = g_frameW;
         nc.frameHeight = g_frameH;
+        nc.connectionsConfigMap = env_or("NMOS_CONNECTIONS_CONFIGMAP", "");
+        nc.stopping = [] { return g_exit.load(std::memory_order_relaxed); };
         if (nc.seed.empty())
         {
             // Resource ids are derived from the seed, so without one they

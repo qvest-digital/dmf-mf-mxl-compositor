@@ -9,6 +9,11 @@
 # container mounting one gets a tmpfs of its own. No flow is written into it: the
 # suites test what the Node publishes and how it answers IS-05, and a tile
 # connected to a flow that is not there stays black without failing.
+#
+# The compositor keeps its connections in a ConfigMap. apiserver serves that
+# one ConfigMap as the Kubernetes API would, and run.sh gives the compositor the
+# service account files a pod has, so a restart of the compositor alone shows
+# what a replaced pod restores.
 
 name: compositor-nmos
 
@@ -36,6 +41,22 @@ services:
       lane:
         ipv4_address: 172.30.99.11
 
+  apiserver:
+    image: amwa/nmos-testing:master-9001851
+    networks:
+      lane:
+        ipv4_address: 172.30.99.40
+    volumes:
+      - ./fake-apiserver.py:/fake-apiserver.py:ro
+      - ${LANE_SECRETS:?run.sh creates the service account files}:/secrets:ro
+    entrypoint:
+      - python3
+      - /fake-apiserver.py
+      - /secrets/ca.crt
+      - /secrets/tls.key
+      - lane-token
+      - /api/v1/namespaces/lane/configmaps/compositor-connections
+
   compositor:
     image: ${COMPOSITOR_IMAGE:-compositor-nmos:dev}
     depends_on:
@@ -43,11 +64,14 @@ services:
         condition: service_started
       rtsp:
         condition: service_started
+      apiserver:
+        condition: service_started
     networks:
       lane:
         ipv4_address: 172.30.99.20
     volumes:
       - ${MXL_ROOT:?run.sh creates the runtime root}:/run/mxl
+      - ${LANE_SECRETS}:/var/run/secrets/kubernetes.io/serviceaccount:ro
     environment:
       MXL_DOMAIN: /run/mxl/domain
       MXL_TILES: "4"
@@ -59,6 +83,9 @@ services:
       NMOS_SEED: compositor-nmos-lane
       NMOS_REGISTRY_HOST: 172.30.99.10
       NMOS_REGISTRY_PORT: "8010"
+      NMOS_CONNECTIONS_CONFIGMAP: compositor-connections
+      KUBERNETES_SERVICE_HOST: 172.30.99.40
+      KUBERNETES_SERVICE_PORT: "6443"
 
   testing:
     image: amwa/nmos-testing:master-9001851
