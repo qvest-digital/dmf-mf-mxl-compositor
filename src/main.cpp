@@ -326,8 +326,8 @@ namespace
         // from; it runs at the rate the mosaic is encoded at.
         if (rate.numerator <= 0)
         {
-            rate.numerator = 30000;
-            rate.denominator = 1001;
+            rate.numerator = 25;
+            rate.denominator = 1;
         }
 
         // Drive the read loop off a monotonic clock at the flow's grain rate.
@@ -344,7 +344,7 @@ namespace
         auto const period = std::chrono::nanoseconds{
             rate.numerator > 0
                 ? static_cast<std::int64_t>(1'000'000'000LL) * rate.denominator / rate.numerator
-                : 33'366'700LL};
+                : 40'000'000LL};
 
         g_print("[%zu] %s starting at rate %d/%d (paced %lld ns/grain)\n",
             w->index, w->flowId.c_str(),
@@ -842,7 +842,11 @@ int main(int argc, char** argv)
     pipelineDesc +=
         "! video/x-raw,format=I420,width=" + std::to_string(OUT_W) +
         ",height=" + std::to_string(OUT_H) +
-        ",framerate=30000/1001 "
+        // Half the 1080p50 house format: the mosaic is a preview, played out
+        // over WebRTC and HLS, and every tile still reads its flow at 50.
+        // An even divisor drops every other grain; 29.97 against 50 dropped
+        // an uneven pattern and cost more encode than this.
+        ",framerate=25/1 "
         // Drop-old leaky queue right after the compositor so a brief
         // encoder hiccup doesn't backpropagate to the readers.
         "! queue leaky=downstream max-size-buffers=4 max-size-bytes=0 max-size-time=0 "
@@ -862,11 +866,11 @@ int main(int argc, char** argv)
         //    compression they would buy is not worth the delivery path.
         //  - profile=main: CABAC. WebRTC carries it; only B-frames are
         //    the problem, so the profile stays.
-        //  - key-int-max=60: 2 s GOP at 30 fps -- matches our HLS
+        //  - key-int-max=50: 2 s GOP at 25 fps -- matches our HLS
         //    segment cadence so I-frames align with segment boundaries.
         "! x264enc speed-preset=faster tune=zerolatency "
                   "bitrate=" + std::to_string(bitrateKbps) + " vbv-buf-capacity=2000 "
-                  "bframes=0 key-int-max=60 "
+                  "bframes=0 key-int-max=50 "
         "! video/x-h264,profile=main "
         // RTSP carries codec frames over RTP, not MPEG-TS. h264parse with
         // config-interval=-1 republishes SPS/PPS on every IDR so a viewer
@@ -886,7 +890,7 @@ int main(int argc, char** argv)
             " is-live=true format=time do-timestamp=true "
             " max-bytes=20971520 block=true "
             // Per-tile leaky queue absorbs short scheduler jitter without
-            // unbounded growth. 3 buffers ~ 100 ms at 30 fps.
+            // unbounded growth. 3 buffers ~ 60 ms at a tile's 50 fps.
             "! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 "
             // No videoscale -- tiles composite at native source resolution.
             "! videoconvert "
