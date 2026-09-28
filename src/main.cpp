@@ -43,6 +43,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "next_grain.hpp"
 #include "nmos/node.hpp"
 #include "nmos/slots.hpp"
 
@@ -170,9 +171,9 @@ namespace
         }
     };
 
-    // How many grains behind the live head to read. The newest grain may be
-    // mid-write; lagging a couple keeps every tile on a grain the writer has
-    // actually finished producing.
+    // How many grains a tile may fall behind its flow's head and still read
+    // every grain in order. Further behind, it jumps to the freshest grain
+    // rather than show ever older content.
     constexpr std::int64_t kLagGrains = 2;
 
     struct FlowWorker
@@ -335,11 +336,11 @@ namespace
         // forced the compositor to copy, decode, and scale every grain the
         // writers produced (~5x the 30 fps they actually emit). That pinned it
         // at 6-7 of 9 tiles and starved the rest to 0 fps; the realign churn on
-        // the starved tiles also flickered the mosaic. Now we sample the newest
-        // finished grain (head - kLagGrains) once per grain period and skip the
-        // rest, so read/decode load stays at N x 30 fps regardless of writer
-        // speed. Re-reading the head each tick also leaves no cursor to wedge
-        // when a flow's index jumps or it restarts.
+        // the starved tiles also flickered the mosaic. Now one grain is read
+        // per grain period: the next in order while within kLagGrains of the
+        // head, the freshest otherwise, so read/decode load stays at the flow
+        // rate regardless of writer speed, and a flow whose index jumps or
+        // restarts is picked up at its head.
         auto const period = std::chrono::nanoseconds{
             rate.numerator > 0
                 ? static_cast<std::int64_t>(1'000'000'000LL) * rate.denominator / rate.numerator
@@ -412,9 +413,9 @@ namespace
         std::uint64_t lastHead = 0;
         int stallTicks = 0;
         constexpr int kStallReopen = 60;
-        // Highest grain index already pushed downstream. The scan below picks
-        // the freshest COMPLETE grain, but when head-kLagGrains is briefly
-        // mid-write it falls back to an older grain -- which, versus the
+        // Highest grain index already pushed downstream; the next read is the
+        // grain after it. The freshest-grain scan below falls back to an older
+        // grain when the head is briefly mid-write -- which, versus the
         // previous tick, would rewind the burned-in clock by a frame. Never
         // emit a grain older than the last one shown: hold the last frame
         // instead. Reset on reopen (a recreated flow restarts its indices).
@@ -557,9 +558,8 @@ namespace
                 }
             }
 
-            // Resolve the freshest finished grain from the live head each tick,
-            // rather than advancing a cursor -- decouples our cadence from the
-            // writer's (over)production rate and self-heals index jumps.
+            // The live head decides whether the next grain in order is still
+            // close enough to read, and is where the scan starts otherwise.
             ::mxlFlowRuntimeInfo rt{};
             bool haveIndex = ::mxlFlowReaderGetRuntimeInfo(w->reader, &rt) == MXL_STATUS_OK &&
                 static_cast<std::int64_t>(rt.headIndex) > kLagGrains;
@@ -585,8 +585,38 @@ namespace
                 stallTicks = 0;
             }
 
-            // Take the freshest grain, scanning from the live head downward,
-            // and key everything off the grain's OWN index (info.index), not
+            // Read the grain after the last one shown, waiting up to a grain
+            // period for the writer to commit it (see next_grain.hpp). Only
+            // that grain, complete and holding its own index, is taken here;
+            // anything else falls through to the freshest-grain scan.
+            ::mxlGrainInfo info{};
+            std::uint8_t* payload = nullptr;
+            bool got = false;
+            bool readerDead = false;
+            std::int64_t chosenIdx = -1;
+            int lastRet = 0;
+            ::mxlGrainInfo lastInfo{};
+            if (auto const want = haveIndex
+                    ? next_grain::after(lastShownIndex, static_cast<std::int64_t>(rt.headIndex), kLagGrains)
+                    : -1;
+                want >= 0)
+            {
+                auto ret = ::mxlFlowReaderGetGrain(w->reader, static_cast<std::uint64_t>(want),
+                    static_cast<std::uint64_t>(period.count()), &info, &payload);
+                lastRet = static_cast<int>(ret);
+                if (ret == MXL_ERR_FLOW_INVALID) readerDead = true;
+                else if (ret == MXL_STATUS_OK && static_cast<std::int64_t>(info.index) == want &&
+                    info.validSlices >= info.totalSlices)
+                {
+                    chosenIdx = want;
+                    got = true;
+                }
+            }
+
+            // Otherwise take the freshest grain, scanning from the live head
+            // downward: on the first read, after a reopen, when behind, or when
+            // the next grain did not arrive within the period.
+            // Key everything off the grain's OWN index (info.index), not
             // the index we asked for. info.index is "the epoch grain index the
             // ring-buffer slot currently holds" -- so it exposes a STALE read:
             // mxl-gst-testsrc constantly backfills the grain grid, and a
@@ -601,14 +631,7 @@ namespace
             // gives the cross-node mirrors. Accept the INVALID flag (every
             // local-ring grain carries it); only skip a half-written grain.
             constexpr int kScanDepth = 5;
-            ::mxlGrainInfo info{};
-            std::uint8_t* payload = nullptr;
-            bool got = false;
-            bool readerDead = false;
-            std::int64_t chosenIdx = -1;
-            int lastRet = 0;
-            ::mxlGrainInfo lastInfo{};
-            for (int back = 0; haveIndex && back < kScanDepth; ++back)
+            for (int back = 0; haveIndex && !got && !readerDead && back < kScanDepth; ++back)
             {
                 std::int64_t idx = static_cast<std::int64_t>(rt.headIndex) - back;
                 if (idx < 0) break;
@@ -652,8 +675,9 @@ namespace
             // Never rewind the CONTENT. chosenIdx is the grain's own index
             // (info.index), so a stale slot -- one whose index is older than
             // what we already showed -- is held here instead of displayed,
-            // keeping the burned-in clock monotonic. Clean mirror flows always
-            // have info.index == head, so they advance every tick.
+            // keeping the burned-in clock monotonic. The scan also lands here
+            // when the next grain did not arrive in time and the head is the
+            // grain already shown.
             if (chosenIdx <= lastShownIndex)
             {
                 pace();

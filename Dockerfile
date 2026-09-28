@@ -45,7 +45,7 @@ WORKDIR /src
 COPY CMakeLists.txt /src/
 COPY vendor /src/vendor/
 COPY src /src/src/
-COPY tests/domain_test.cpp tests/connections_test.cpp /src/tests/
+COPY tests/domain_test.cpp tests/connections_test.cpp tests/next_grain_test.cpp /src/tests/
 COPY --from=nvnmos /opt/nvnmos /opt/nvnmos
 
 # The builder image ships libmxl under /opt/libmxl/lib without a multiarch
