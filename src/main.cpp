@@ -341,10 +341,7 @@ namespace
         // head, the freshest otherwise, so read/decode load stays at the flow
         // rate regardless of writer speed, and a flow whose index jumps or
         // restarts is picked up at its head.
-        auto const period = std::chrono::nanoseconds{
-            rate.numerator > 0
-                ? static_cast<std::int64_t>(1'000'000'000LL) * rate.denominator / rate.numerator
-                : 33'366'700LL};
+        auto period = next_grain::period(rate.numerator, rate.denominator);
 
         g_print("[%zu] %s starting at rate %d/%d (paced %lld ns/grain)\n",
             w->index, w->flowId.c_str(),
@@ -543,6 +540,27 @@ namespace
                             refused = w->flowId;
                             continue;
                         }
+                    }
+
+                    // A tile that started with nothing connected runs at the
+                    // mosaic's rate. The flow a controller connects later has
+                    // its own, and pacing, timestamps and caps follow it, or a
+                    // 50 fps flow is drawn at 29.97 for as long as it stays.
+                    if (auto const r = w->config.common.grainRate; r.numerator > 0 && r.denominator > 0 &&
+                        (r.numerator != rate.numerator || r.denominator != rate.denominator))
+                    {
+                        rate = r;
+                        period = next_grain::period(rate.numerator, rate.denominator);
+                        auto* newCaps = ::gst_caps_new_simple("video/x-raw",
+                            "format", G_TYPE_STRING, "v210",
+                            "width", G_TYPE_INT, vw,
+                            "height", G_TYPE_INT, vh,
+                            "framerate", GST_TYPE_FRACTION, rate.numerator, rate.denominator,
+                            nullptr);
+                        ::g_object_set(G_OBJECT(w->appsrc), "caps", newCaps, nullptr);
+                        ::gst_caps_unref(newCaps);
+                        g_print("[%zu] %s rate now %d/%d\n", w->index, w->flowId.c_str(),
+                            rate.numerator, rate.denominator);
                     }
                 }
                 else
