@@ -67,6 +67,11 @@ int main()
     auto const behind = shown({10, 20, 21});
     check(behind.size() == 3 && behind[1] == 20 && behind[2] == 21, "catch up from far behind");
 
+    // A tile paces at its flow's rate, and at the mosaic's while none is set.
+    check(next_grain::period(50, 1).count() == 20'000'000, "50 fps paces at 20 ms");
+    check(next_grain::period(30000, 1001).count() == 33'366'666, "29.97 fps paces at 33.37 ms");
+    check(next_grain::period(0, 0).count() == 33'366'700, "an unset rate falls back to 29.97");
+
     if (failures == 0) std::puts("next_grain_test: ok");
     return failures == 0 ? 0 : 1;
 }

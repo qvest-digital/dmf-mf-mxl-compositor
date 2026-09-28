@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 
 namespace next_grain
@@ -25,5 +26,13 @@ namespace next_grain
         std::int64_t const next = lastShown + 1;
         if (next > head + 1 || head - next > maxLag) return -1;
         return next;
+    }
+
+    // The time between two grains at numerator/denominator grains per second.
+    // A rate that is not set paces at 30000/1001, the mosaic's own rate.
+    inline std::chrono::nanoseconds period(std::int64_t numerator, std::int64_t denominator)
+    {
+        if (numerator <= 0 || denominator <= 0) return std::chrono::nanoseconds{33'366'700LL};
+        return std::chrono::nanoseconds{1'000'000'000LL * denominator / numerator};
     }
 }
