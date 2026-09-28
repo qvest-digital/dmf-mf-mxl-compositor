@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.13](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.12...v1.0.0-rc.13) (2026-09-28)
+
+
+### Bug Fixes
+
+* show every grain of a flow, not every grain a tick samples ([#27](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/27)) ([c8c14ef](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/c8c14ef790c9df7545f47508e83369871daf6f9d))
+
 ## [1.0.0-rc.12](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.11...v1.0.0-rc.12) (2026-09-27)
 
 
