@@ -29,10 +29,10 @@ namespace next_grain
     }
 
     // The time between two grains at numerator/denominator grains per second.
-    // A rate that is not set paces at 30000/1001, the mosaic's own rate.
+    // A rate that is not set paces at 25, the mosaic's own rate.
     inline std::chrono::nanoseconds period(std::int64_t numerator, std::int64_t denominator)
     {
-        if (numerator <= 0 || denominator <= 0) return std::chrono::nanoseconds{33'366'700LL};
+        if (numerator <= 0 || denominator <= 0) return std::chrono::nanoseconds{40'000'000LL};
         return std::chrono::nanoseconds{1'000'000'000LL * denominator / numerator};
     }
 }
