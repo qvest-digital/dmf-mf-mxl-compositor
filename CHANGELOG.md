@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.14](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.13...v1.0.0-rc.14) (2026-09-28)
+
+
+### Features
+
+* encode the mosaic at 25 fps ([#30](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/30)) ([6b1543a](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/6b1543a86f8be0e561d1900fbf6a371c06c38550))
+
 ## [1.0.0-rc.13](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.12...v1.0.0-rc.13) (2026-09-28)
 
 
