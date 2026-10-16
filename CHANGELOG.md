@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.15](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.14...v1.0.0-rc.15) (2026-10-16)
+
+
+### Bug Fixes
+
+* **nmos:** pace a tile at the rate of the flow connected to it ([#29](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/29)) ([ab9b656](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/ab9b656cabbc66979d1abd85299efba861d38503))
+
 ## [1.0.0-rc.14](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.13...v1.0.0-rc.14) (2026-09-28)
 
 
