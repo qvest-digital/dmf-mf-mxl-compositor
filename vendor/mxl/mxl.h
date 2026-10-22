@@ -21,7 +21,11 @@ extern "C"
     typedef enum mxlStatus
     {
         MXL_STATUS_OK,
+
+        // Do not check for MXL_ERR_UNKNOWN. Functions that return MXL_ERR_UNKNOWN in a certain situation, may return
+        // a more descriptive error code in the future and this would not be considered a breaking change.
         MXL_ERR_UNKNOWN,
+
         MXL_ERR_FLOW_NOT_FOUND,
         MXL_ERR_OUT_OF_RANGE_TOO_LATE,
         MXL_ERR_OUT_OF_RANGE_TOO_EARLY,
@@ -45,6 +49,7 @@ extern "C"
         MXL_ERR_NOT_READY,
         MXL_ERR_NOT_FOUND,
         MXL_ERR_EXISTS,
+        MXL_ERR_UNSUPPORTED_OPERATION,
     } mxlStatus;
 
     /// MXL SDK Semantic versionning structure.
@@ -83,8 +88,6 @@ extern "C"
     /// no longer active (in other words, no readers or writers are using them. This typically
     /// happens when an application creating flows writers crashes or exits without cleaning up.
     /// A flow is considered active if a shared advisory lock is held on the data file of the flow.
-    /// This function is automatically called when the instance is created but should be called periodically
-    /// on a long running application to clean up any flows that are no longer active.
     ///
     MXL_EXPORT
     mxlStatus mxlGarbageCollectFlows(mxlInstance in_instance);

@@ -10,7 +10,7 @@
 # tag the gateway and node agent serving the same domain were built from.
 # Moving it here alone breaks reads against them.
 # renovate: datasource=docker depName=ghcr.io/qvest-digital/go-mxl-builder
-ARG GO_MXL_TAG=1.0.0-rc.12
+ARG GO_MXL_TAG=1.1.0-rc.7
 
 # NvNmos, NVIDIA's C API over nmos-cpp, provides the NMOS Node: IS-04
 # registration, the IS-05 Connection API and BCP-007-03's MXL transport. It is
