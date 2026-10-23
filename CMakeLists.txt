@@ -27,7 +27,7 @@ target_compile_options(mxl-multi-compositor PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(mxl-multi-compositor PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/vendor ${CMAKE_CURRENT_SOURCE_DIR}/src ${NVNMOS_INCLUDE_DIR})
 target_link_libraries(mxl-multi-compositor PRIVATE
-  PkgConfig::GST PkgConfig::CURL mxl nmos-support ${NVNMOS_LIBRARY} pthread)
+  PkgConfig::GST PkgConfig::CURL mxl nmos-support nlohmann_json::nlohmann_json ${NVNMOS_LIBRARY} pthread)
 
 install(TARGETS mxl-multi-compositor
         RUNTIME DESTINATION bin)
@@ -43,3 +43,8 @@ add_test(NAME connections_test COMMAND connections_test)
 add_executable(next_grain_test tests/next_grain_test.cpp)
 target_include_directories(next_grain_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME next_grain_test COMMAND next_grain_test)
+
+add_executable(flow_def_test tests/flow_def_test.cpp)
+target_include_directories(flow_def_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(flow_def_test PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME flow_def_test COMMAND flow_def_test)

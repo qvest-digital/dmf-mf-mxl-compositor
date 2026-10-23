@@ -43,6 +43,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "flow_def.hpp"
 #include "next_grain.hpp"
 #include "nmos/node.hpp"
 #include "nmos/slots.hpp"
@@ -91,47 +92,6 @@ namespace
         std::string tok;
         while (is >> tok) out.push_back(tok);
         return out;
-    }
-
-    // Minimal extractor for a top-level string field in the flow-def JSON,
-    // e.g. "media_type": "video/v210". Same matching rules as json_int_field;
-    // returns "" if absent or not a string.
-    std::string json_str_field(std::string const& json, char const* field)
-    {
-        auto const key = std::string{"\""} + field + "\"";
-        auto pos = json.find(key);
-        if (pos == std::string::npos) return "";
-        pos = json.find(':', pos + key.size());
-        if (pos == std::string::npos) return "";
-        pos = json.find_first_not_of(" \t", pos + 1);
-        if (pos == std::string::npos || json[pos] != '"') return "";
-        auto const end = json.find('"', pos + 1);
-        if (end == std::string::npos) return "";
-        return json.substr(pos + 1, end - pos - 1);
-    }
-
-    // Minimal extractor for a top-level integer field in the flow-def JSON,
-    // e.g. "frame_width": 1920. Avoids pulling in a JSON dependency for two
-    // numbers. Matches the exact quoted key so it won't collide with the
-    // nested "width"/"height" under components[]. Returns -1 if absent.
-    int json_int_field(std::string const& json, char const* field)
-    {
-        auto const key = std::string{"\""} + field + "\"";
-        auto pos = json.find(key);
-        if (pos == std::string::npos) return -1;
-        pos = json.find(':', pos + key.size());
-        if (pos == std::string::npos) return -1;
-        ++pos;
-        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
-        int val = 0;
-        bool any = false;
-        while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9')
-        {
-            val = val * 10 + (json[pos] - '0');
-            ++pos;
-            any = true;
-        }
-        return any ? val : -1;
     }
 
     // Re-implementation of the Cursor pattern from mxl-gst-sink. Keeps each
@@ -367,9 +327,9 @@ namespace
             std::size_t defSize = defBuf.size();
             if (::mxlGetFlowDef(w->instance, w->flowId.c_str(), defBuf.data(), &defSize) == MXL_STATUS_OK)
             {
-                std::string const def{defBuf.data()};
-                int const pw = json_int_field(def, "frame_width");
-                int const ph = json_int_field(def, "frame_height");
+                auto const def = flow_def::parse(defBuf.data());
+                int const pw = def.frameWidth;
+                int const ph = def.frameHeight;
                 if (pw > 0 && ph > 0)
                 {
                     vw = pw;
@@ -513,12 +473,12 @@ namespace
                     std::size_t defSize = defBuf.size();
                     if (::mxlGetFlowDef(w->instance, w->flowId.c_str(), defBuf.data(), &defSize) == MXL_STATUS_OK)
                     {
-                        std::string const def{defBuf.data()};
+                        auto const def = flow_def::parse(defBuf.data());
                         // A controller can connect any flow id to a tile. Only
                         // v210 video is drawn; audio or ancillary data would
                         // freeze the tile, and data grains are never complete,
                         // so a read would wait out its whole timeout each tick.
-                        auto const mediaType = json_str_field(def, "media_type");
+                        auto const& mediaType = def.mediaType;
                         if (mediaType != "video/v210")
                         {
                             g_printerr("[%zu] %s is %s, not video/v210; not shown\n",
@@ -529,8 +489,8 @@ namespace
                             refused = w->flowId;
                             continue;
                         }
-                        int const fw = json_int_field(def, "frame_width");
-                        int const fh = json_int_field(def, "frame_height");
+                        int const fw = def.frameWidth;
+                        int const fh = def.frameHeight;
                         if (fw > 0 && fh > 0 && (fw != vw || fh != vh))
                         {
                             g_printerr("[%zu] %s is %dx%d, the tile is %dx%d; not shown\n",
