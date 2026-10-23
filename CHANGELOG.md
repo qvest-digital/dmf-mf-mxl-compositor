@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.17](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.16...v1.0.0-rc.17) (2026-10-23)
+
+
+### Bug Fixes
+
+* **nmos:** read a flow definition's escaped media type ([#35](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/35)) ([62dab86](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/62dab8644ab8c74b50fa007530eb647c72b669dd))
+
 ## [1.0.0-rc.16](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.15...v1.0.0-rc.16) (2026-10-22)
 
 
