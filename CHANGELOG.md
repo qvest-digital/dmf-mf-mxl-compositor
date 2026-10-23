@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.18](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.17...v1.0.0-rc.18) (2026-10-23)
+
+
+### Bug Fixes
+
+* **nmos:** advertise each control href once ([#36](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/36)) ([9099412](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/9099412e180876de37be4ad5274094d7a8086362))
+
 ## [1.0.0-rc.17](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.16...v1.0.0-rc.17) (2026-10-23)
 
 
