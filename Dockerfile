@@ -20,7 +20,7 @@ ARG GO_MXL_TAG=1.1.0-rc.7
 # when the tag is missing, and refuses a NVNMOS_PATCHES that is not the first
 # 8 hex digits of sha256sum docker/nvnmos/patches/*.patch | sha256sum.
 ARG NVNMOS_REF=36fb7db9b5616a26f77164de735c15171e01aaed
-ARG NVNMOS_PATCHES=738ca8fb
+ARG NVNMOS_PATCHES=c9423d36
 ARG NVNMOS_IMAGE=ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:${NVNMOS_REF}-${NVNMOS_PATCHES}
 
 FROM ${NVNMOS_IMAGE} AS nvnmos

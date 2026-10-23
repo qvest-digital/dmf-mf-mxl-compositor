@@ -284,7 +284,8 @@ namespace nmos_node
         // advertises every Connection API under the host name as well as the
         // addresses, host name first, and left unset that is the pod's own
         // name, which resolves nowhere outside it: a controller that tries
-        // the hrefs in order stops at the first one it cannot resolve.
+        // the hrefs in order stops at the first one it cannot resolve. A host
+        // name that is one of the addresses is advertised once.
         nc.host_name = cfg.hostAddress.c_str();
         nc.host_addresses = hostAddresses;
         nc.num_host_addresses = 1;
