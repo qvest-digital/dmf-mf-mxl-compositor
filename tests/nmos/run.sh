@@ -169,8 +169,11 @@ for _ in $(seq 1 30); do
 done
 [ "$(jq -r .version <<<"$rec")" != "$version_before" ] && [ "$sub" = "$want" ] || {
   echo "FAIL the registry does not show the restored subscription: $sub"; restore_rc=1; }
-docker compose logs --since "$restarted" compositor 2>/dev/null | grep -q "$FLOW in /run/mxl/domains/${SECOND_ID}" || {
-  echo "FAIL the restarted compositor did not put the flow on the tile"; restore_rc=1; }
+# The tile reopens the flow from its own retry loop, which can log after the
+# registry already shows the subscription.
+on_tile() { docker compose logs --since "$restarted" compositor 2>/dev/null | grep "$FLOW in /run/mxl/domains/${SECOND_ID}" >/dev/null; }
+for _ in $(seq 1 15); do on_tile && break; sleep 1; done
+on_tile || { echo "FAIL the restarted compositor did not put the flow on the tile"; restore_rc=1; }
 code=$(in_lane -o /dev/null -w '%{http_code}' -X PATCH -H 'Content-Type: application/json' "$conn/$rx/staged" \
   -d '{"master_enable":false,"activation":{"mode":"activate_immediate"}}')
 [ "$code" = 200 ] || { echo "FAIL disconnect: HTTP $code"; restore_rc=1; }
