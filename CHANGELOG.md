@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.19](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.18...v1.0.0-rc.19) (2026-10-25)
+
+
+### Bug Fixes
+
+* **nmos:** advertise the pod's DNS name as the Node's host name ([#39](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/39)) ([7b23abf](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/7b23abf21d8e7f50670eaf96be28ea6569952d9e))
+
 ## [1.0.0-rc.18](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.17...v1.0.0-rc.18) (2026-10-23)
 
 
