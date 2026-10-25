@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.20](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.19...v1.0.0-rc.20) (2026-10-25)
+
+
+### Features
+
+* run tiles, output and NMOS caps at MXL_GRAIN_RATE ([78a0ec3](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/78a0ec39ddcf096aa7954559066afdec2516a820))
+
+
+### Bug Fixes
+
+* encode the mosaic with x264 preset superfast ([78a0ec3](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/78a0ec39ddcf096aa7954559066afdec2516a820))
+
 ## [1.0.0-rc.19](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.18...v1.0.0-rc.19) (2026-10-25)
 
 
