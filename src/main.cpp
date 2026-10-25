@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -45,6 +46,7 @@
 
 #include "flow_def.hpp"
 #include "next_grain.hpp"
+#include "nmos/host_name.hpp"
 #include "nmos/node.hpp"
 #include "nmos/slots.hpp"
 
@@ -905,6 +907,16 @@ int main(int argc, char** argv)
             nc.domainsDir = (slash == std::string::npos || slash == 0 ? std::string{} : domain.substr(0, slash)) + "/domains";
         }
         nc.hostAddress = nmosHost;
+        std::ifstream resolvConf{"/etc/resolv.conf"};
+        std::string hostNameError;
+        auto hostName = nmos_host_name::node_host_name(env_or("NMOS_HOST_NAME", ""), nmosHost,
+                                                       env_or("NMOS_POD_NAMESPACE", ""), resolvConf, hostNameError);
+        if (!hostName)
+        {
+            g_printerr("%s\n", hostNameError.c_str());
+            return 8;
+        }
+        nc.hostName = *hostName;
         nc.httpPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_HTTP_PORT", "0").c_str()));
         nc.seed = env_or("NMOS_SEED", "");
         nc.label = env_or("NMOS_LABEL", "MXL compositor");

@@ -226,6 +226,11 @@ namespace nmos_node
             error = "no host address to advertise the Node API at";
             return nullptr;
         }
+        if (cfg.hostName.empty())
+        {
+            error = "no host name to advertise the Node API under";
+            return nullptr;
+        }
         std::vector<std::string> domainIds;
         for (auto const& d : domains) domainIds.push_back(d.id);
 
@@ -280,13 +285,9 @@ namespace nmos_node
         services.system_port = cfg.systemPort;
 
         NvNmosNodeConfig nc{};
-        // The address the Node was given, as its host name too. NvNmos
-        // advertises every Connection API under the host name as well as the
-        // addresses, host name first, and left unset that is the pod's own
-        // name, which resolves nowhere outside it: a controller that tries
-        // the hrefs in order stops at the first one it cannot resolve. A host
-        // name that is one of the addresses is advertised once.
-        nc.host_name = cfg.hostAddress.c_str();
+        // NvNmos advertises every API under the host name first, then the
+        // addresses, so the host name has to be a DNS name controllers resolve.
+        nc.host_name = cfg.hostName.c_str();
         nc.host_addresses = hostAddresses;
         nc.num_host_addresses = 1;
         nc.http_port = cfg.httpPort;

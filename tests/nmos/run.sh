@@ -13,6 +13,7 @@ cd "$(dirname "$0")"
 REPO_ROOT=$(cd ../.. && pwd)
 export COMPOSITOR_IMAGE="${COMPOSITOR_IMAGE:-compositor-nmos:dev}"
 NODE=172.30.99.20
+NAME=172-30-99-20.lane.pod.cluster.lane
 PORT=8080
 
 if [ "${COMPOSITOR_IMAGE}" = "compositor-nmos:dev" ]; then
@@ -68,16 +69,22 @@ wait_registered() {
 }
 wait_registered
 
-# Every Connection API href the Node advertises has to be reachable at the
-# address it was given. A controller tries the hrefs in order, and a pod's own
-# host name does not resolve anywhere outside it -- a controller that stops at
-# the first unresolvable one cannot connect anything.
-hrefs=$(docker compose exec -T registry sh -c \
-    "curl -s http://127.0.0.1:8010/x-nmos/query/v1.3/devices/" 2>/dev/null \
-  | grep -oE '"href":"http://[^"]*/x-nmos/connection/[^"]*"' | sort -u)
-if [ -z "$hrefs" ] || grep -v "http://$NODE:" <<<"$hrefs" >/dev/null; then
+# Every Connection API and the Node API are advertised once under the Node's
+# DNS name and once under its address, the name first, and the name resolves
+# from another container: a controller tries the hrefs in order.
+query() { docker compose exec -T registry curl -s "http://127.0.0.1:8010/x-nmos/query/v1.3/$1"; }
+hrefs=$(query devices/ | jq -r '.[].controls[] | select(.href | contains("/x-nmos/connection/")) | .href')
+endpoints=$(query nodes/ | jq -r --arg a "$NODE" \
+  '.[] | select(any(.api.endpoints[]; .host == $a)) | [.api.endpoints[].host] | join(" ")')
+paths=$(sed -E 's|^http://[^/]*||' <<<"$hrefs" | sort -u)
+want=$(while read -r p; do echo "http://$NAME:$PORT$p"; echo "http://$NODE:$PORT$p"; done <<<"$paths" | sort)
+if [ -z "$hrefs" ] || [ "$(sort <<<"$hrefs")" != "$want" ] \
+    || [ "$(query devices/ | jq -r '.[].controls[0].href' | grep -cv "^http://$NAME:")" -ne 0 ] \
+    || [ "$endpoints" != "$NAME $NODE" ] \
+    || ! docker compose exec -T registry curl -sf -o /dev/null "http://$NAME:$PORT/x-nmos/node/"; then
   echo "FAIL advertised hrefs"
   sed 's/^/    /' <<<"${hrefs:-(none)}"
+  echo "    node api: ${endpoints:-(none)}"
   hrefs_rc=1
 else
   echo "PASS advertised hrefs"

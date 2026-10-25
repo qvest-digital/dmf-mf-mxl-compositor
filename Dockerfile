@@ -20,7 +20,7 @@ ARG GO_MXL_TAG=1.1.0-rc.7
 # when the tag is missing, and refuses a NVNMOS_PATCHES that is not the first
 # 8 hex digits of sha256sum docker/nvnmos/patches/*.patch | sha256sum.
 ARG NVNMOS_REF=36fb7db9b5616a26f77164de735c15171e01aaed
-ARG NVNMOS_PATCHES=c9423d36
+ARG NVNMOS_PATCHES=738ca8fb
 ARG NVNMOS_IMAGE=ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:${NVNMOS_REF}-${NVNMOS_PATCHES}
 
 FROM ${NVNMOS_IMAGE} AS nvnmos
@@ -45,7 +45,7 @@ WORKDIR /src
 COPY CMakeLists.txt /src/
 COPY vendor /src/vendor/
 COPY src /src/src/
-COPY tests/domain_test.cpp tests/connections_test.cpp tests/next_grain_test.cpp tests/flow_def_test.cpp /src/tests/
+COPY tests/domain_test.cpp tests/connections_test.cpp tests/next_grain_test.cpp tests/flow_def_test.cpp tests/host_name_test.cpp /src/tests/
 COPY --from=nvnmos /opt/nvnmos /opt/nvnmos
 
 # The builder image ships libmxl under /opt/libmxl/lib without a multiarch

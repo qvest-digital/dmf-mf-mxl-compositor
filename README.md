@@ -96,6 +96,8 @@ on it; the API server, namespace, token and CA are the ones every pod is given
 | Variable | Default | Meaning |
 |---|---|---|
 | `NMOS_HOST_ADDRESS` | unset, NMOS off | Address the Node APIs are reached at |
+| `NMOS_HOST_NAME` | the pod's DNS name | DNS name the Node APIs are reached at; required with NMOS outside Kubernetes |
+| `NMOS_POD_NAMESPACE` | none | Namespace of the pod, which names its DNS record; required with NMOS where `NMOS_HOST_NAME` is unset |
 | `NMOS_SEED` | none, required with NMOS | Seed for resource ids; stable per instance |
 | `NMOS_HTTP_PORT` | library default | Port for the Node and Connection APIs |
 | `NMOS_LABEL` | `MXL compositor` | Node and Device label |
@@ -104,8 +106,17 @@ on it; the API server, namespace, token and CA are the ones every pod is given
 | `NMOS_REGISTRY_PORT` | `80` | Its port |
 | `NMOS_SYSTEM_HOST` | `NMOS_REGISTRY_HOST` | Fixed IS-09 System API |
 | `NMOS_SYSTEM_PORT` | `NMOS_REGISTRY_PORT` | Its port |
-| `NMOS_DNS_DOMAIN` | from resolv.conf | DNS-SD domain to browse for a registry |
+| `NMOS_DNS_DOMAIN` | the host name's domain, else the library default | DNS-SD domain to browse for a registry |
 | `NMOS_CONNECTIONS_CONFIGMAP` | unset, not kept | ConfigMap that keeps tile connections across restarts |
+
+The Node advertises its APIs under its host name, then under
+`NMOS_HOST_ADDRESS`, so the host name has to be a DNS name that resolves to
+it. `NMOS_HOST_NAME` sets it; it must contain a dot and must not be an
+address. Unset, it is the pod's DNS name,
+`<address with dashes>.<namespace>.pod.<cluster domain>`, which CoreDNS
+serves with `pods insecure` or `pods verified`. The cluster domain is taken
+from the `<namespace>.svc.` entry in the last search line of
+`/etc/resolv.conf`. The compositor exits where neither yields a name.
 
 The Node is [NvNmos](https://github.com/NVIDIA/nvnmos), NVIDIA's C API over
 nmos-cpp, pinned by commit in the Dockerfile's `NVNMOS_REF`.
@@ -126,11 +137,11 @@ suite. It needs `/dev/shm` for the MXL domain, and curl, jq and openssl.
     docker build -t dmf-mf-mxl-compositor .
 
 `ARG GO_MXL_TAG` selects the `go-mxl-builder` and `go-mxl-runtime` base images.
-`ARG NVNMOS_REF` selects the libnvnmos image, built from
-`docker/nvnmos/Dockerfile`:
+`ARG NVNMOS_REF` and `ARG NVNMOS_PATCHES` select the libnvnmos image, built
+from `docker/nvnmos/Dockerfile`:
 
     docker build -f docker/nvnmos/Dockerfile --build-arg NVNMOS_REF=<ref> \
-        -t ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:<ref> docker/nvnmos
+        -t ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:<ref>-<patches> docker/nvnmos
 
 Its dependencies are compiled from source and take the better part of an hour,
 so the build workflow publishes it only when the pinned tag is missing, and the
