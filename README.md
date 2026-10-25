@@ -13,11 +13,14 @@ nothing else.
 
 ## mxl-multi-compositor
 
-One dedicated reader thread per flow pulls the freshest complete grain from the
-MXL ring buffer at the flow's native grain rate. A GStreamer `compositor`
+One dedicated reader thread per flow reads one grain per period of
+`MXL_GRAIN_RATE` from the MXL ring buffer. A flow no faster than that rate is
+shown grain by grain, its grains repeated where it is slower; a faster one is
+sampled at the head, so its grains drop evenly. A GStreamer `compositor`
 element lays the raw frames out at their native tile size and hands the
-composed frame to a single x264 encoder, so there is no per-flow decode pass.
-The encoded bitstream goes to `rtspclientsink`.
+composed frame to a single x264 encoder at `MXL_GRAIN_RATE`, with a 2 s GOP,
+so there is no per-flow decode pass. The encoded bitstream goes to
+`rtspclientsink`.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -27,13 +30,15 @@ The encoded bitstream goes to `rtspclientsink`.
 | `MXL_COMPOSITE_OUT` | `rtsp://mediamtx:8554/composite` | RTSP publish target |
 | `MXL_FRAME_WIDTH` | `1920` | Tile width, must match the flow definition |
 | `MXL_FRAME_HEIGHT` | `1080` | Tile height, must match the flow definition |
+| `MXL_GRAIN_RATE` | `50/1` | Rate of every tile, the output and the NMOS caps; `numerator/denominator` or whole |
 | `MXL_GRID_COLS` | derived | Column count override |
 | `MXL_STATS_PORT` | `9090` | Port for the `/stats.json` server |
 | `MXL_TILES` | flow count | Tile count; tiles beyond `MXL_FLOW_IDS` start empty |
 
-No tiles -- neither `MXL_FLOW_IDS` nor `MXL_TILES` -- exits non-zero. Opening a reader retries indefinitely
-rather than exiting, so a flow that is not yet present does not turn into a
-crash loop.
+No tiles -- neither `MXL_FLOW_IDS` nor `MXL_TILES` -- exits non-zero, as does
+an `MXL_GRAIN_RATE` that is not two positive integers. Opening a reader retries
+indefinitely rather than exiting, so a flow that is not yet present does not
+turn into a crash loop.
 
 Grid geometry is computed once the flow count is known: `cols = ceil(sqrt(n))`,
 `rows = ceil(n / cols)`. The output canvas is `cols * MXL_FRAME_WIDTH` by
@@ -63,9 +68,12 @@ started until at least one domain yields a UUID: an MXL Receiver with no domain
 to name is one no controller can route to. It retries every ten seconds and
 logs why; the mosaic runs meanwhile.
 
-A flow whose frame size is not the tile's is not shown, because tiles are
-composited at their native size without scaling. The tile stays black and the
-reason is logged.
+Each Receiver's BCP-004-01 caps name v210 at `MXL_FRAME_WIDTH` by
+`MXL_FRAME_HEIGHT`, progressive, at `MXL_GRAIN_RATE`, so a controller offers
+it only flows of that format and rate. A flow whose frame size is not the
+tile's is not shown, because tiles are composited at their native size without
+scaling; the tile stays black and the reason is logged. A flow of another rate
+is shown at the tile's.
 
 ### Connections across a restart
 

@@ -54,6 +54,8 @@ namespace nmos_node
         // Tile geometry and rate, stated in each Receiver's caps.
         int frameWidth{1920};
         int frameHeight{1080};
+        int grainRateNumerator{0};
+        int grainRateDenominator{1};
         // A ConfigMap in the pod's own namespace that keeps each tile's
         // connection across restarts. Empty keeps them in memory only.
         std::string connectionsConfigMap;

@@ -28,11 +28,21 @@ namespace next_grain
         return next;
     }
 
+    // How far behind the head a tile ticking at tickN/tickD may read a flow of
+    // flowN/flowD in order. A flow no faster than the tick is read grain by
+    // grain within maxLag. A faster one is sampled: the head each tick, so its
+    // grains drop evenly instead of the reader falling behind until it jumps.
+    // A flow that reports no rate is read in order.
+    inline std::int64_t lag_for(std::int64_t flowN, std::int64_t flowD, std::int64_t tickN, std::int64_t tickD,
+        std::int64_t maxLag)
+    {
+        if (flowN <= 0 || flowD <= 0) return maxLag;
+        return flowN * tickD > tickN * flowD ? 0 : maxLag;
+    }
+
     // The time between two grains at numerator/denominator grains per second.
-    // A rate that is not set paces at 25, the mosaic's own rate.
     inline std::chrono::nanoseconds period(std::int64_t numerator, std::int64_t denominator)
     {
-        if (numerator <= 0 || denominator <= 0) return std::chrono::nanoseconds{40'000'000LL};
         return std::chrono::nanoseconds{1'000'000'000LL * denominator / numerator};
     }
 }

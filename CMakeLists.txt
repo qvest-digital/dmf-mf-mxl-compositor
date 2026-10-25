@@ -49,6 +49,10 @@ target_include_directories(flow_def_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 target_link_libraries(flow_def_test PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME flow_def_test COMMAND flow_def_test)
 
+add_executable(grain_rate_test tests/grain_rate_test.cpp)
+target_include_directories(grain_rate_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME grain_rate_test COMMAND grain_rate_test)
+
 add_executable(host_name_test tests/host_name_test.cpp)
 target_include_directories(host_name_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME host_name_test COMMAND host_name_test)
