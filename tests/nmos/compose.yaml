@@ -66,9 +66,13 @@ services:
         condition: service_started
       apiserver:
         condition: service_started
+    # The search list and DNS name cluster DNS gives a pod in namespace lane,
+    # under a cluster domain other than the usual one.
+    dns_search: [lane.svc.cluster.lane, svc.cluster.lane, cluster.lane]
     networks:
       lane:
         ipv4_address: 172.30.99.20
+        aliases: [172-30-99-20.lane.pod.cluster.lane]
     volumes:
       - ${MXL_ROOT:?run.sh creates the runtime root}:/run/mxl
       - ${LANE_SECRETS}:/var/run/secrets/kubernetes.io/serviceaccount:ro
@@ -79,6 +83,7 @@ services:
       MXL_FRAME_WIDTH: "1280"
       MXL_FRAME_HEIGHT: "720"
       NMOS_HOST_ADDRESS: 172.30.99.20
+      NMOS_POD_NAMESPACE: lane
       NMOS_HTTP_PORT: "8080"
       NMOS_SEED: compositor-nmos-lane
       NMOS_REGISTRY_HOST: 172.30.99.10

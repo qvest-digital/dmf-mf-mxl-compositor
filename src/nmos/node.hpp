@@ -30,6 +30,9 @@ namespace nmos_node
         // Required. The address this Node's APIs are reached at, which the
         // registry hands to controllers.
         std::string hostAddress;
+        // Required. The DNS name they are reached at, advertised before the
+        // address.
+        std::string hostName;
         // Port for the Node and Connection APIs. 0 takes the library default.
         unsigned int httpPort{0};
         // Seed for stable resource ids across restarts. Two instances
