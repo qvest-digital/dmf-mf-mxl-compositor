@@ -45,6 +45,7 @@
 #include <unistd.h>
 
 #include "flow_def.hpp"
+#include "grain_rate.hpp"
 #include "next_grain.hpp"
 #include "nmos/host_name.hpp"
 #include "nmos/node.hpp"
@@ -67,6 +68,10 @@ namespace
     // descriptor). Defaults to 1080p for backwards compatibility.
     int g_frameW = 1920;
     int g_frameH = 1080;
+
+    // The compositor's one rate, MXL_GRAIN_RATE: every tile reads at it, the
+    // mosaic is encoded at it, and the NMOS Receivers advertise it.
+    grain_rate::Rate g_rate{};
 
     // Mosaic geometry + per-grain payload size, set in main() once the flow
     // count is known. Read by the /stats.json server thread so the frontend
@@ -95,43 +100,6 @@ namespace
         while (is >> tok) out.push_back(tok);
         return out;
     }
-
-    // Re-implementation of the Cursor pattern from mxl-gst-sink. Keeps each
-    // reader pinned to the live grain index for its flow's rate; next()
-    // sleeps until the next grain's delivery deadline so workers don't busy-
-    // poll. readDelay=0 because the compositor wants the freshest frame.
-    struct Cursor
-    {
-        mxlRational rate;
-        std::uint32_t windowSize;
-        std::int64_t readDelayGrains;
-        std::uint64_t currentIndex;
-        std::uint64_t requestedIndex;
-        std::uint64_t deliveryDeadline;
-
-        Cursor(mxlRational r, std::uint32_t w, std::int64_t readDelayNs)
-            : rate{r}
-            , windowSize{w}
-            , readDelayGrains{((::mxlTimestampToIndex(&r, readDelayNs) + w - 1) / w) * w}
-        {
-            realign(::mxlGetTime());
-        }
-
-        void realign(std::uint64_t now)
-        {
-            currentIndex = ((::mxlTimestampToIndex(&rate, now) + (windowSize / 2)) / windowSize) * windowSize;
-            requestedIndex = currentIndex - readDelayGrains;
-            deliveryDeadline = ::mxlIndexToTimestamp(&rate, currentIndex + windowSize);
-        }
-
-        void next()
-        {
-            ::mxlSleepUntil(deliveryDeadline);
-            currentIndex += windowSize;
-            requestedIndex += windowSize;
-            deliveryDeadline = ::mxlIndexToTimestamp(&rate, currentIndex + windowSize);
-        }
-    };
 
     // How many grains a tile may fall behind its flow's head and still read
     // every grain in order. Further behind, it jumps to the freshest grain
@@ -283,31 +251,24 @@ namespace
     void worker_loop(FlowWorker* w)
     {
         using clock = std::chrono::steady_clock;
-        auto rate = w->config.common.grainRate;
-        // A tile that starts with nothing connected has no flow to take a rate
-        // from; it runs at the rate the mosaic is encoded at.
-        if (rate.numerator <= 0)
-        {
-            rate.numerator = 25;
-            rate.denominator = 1;
-        }
-
-        // Drive the read loop off a monotonic clock at the flow's grain rate.
-        // The producers (mxl-gst-testsrc) free-run at ~5x realtime, so each
-        // flow head runs ahead of nominal cadence. Walking the ring in sequence
-        // forced the compositor to copy, decode, and scale every grain the
-        // writers produced (~5x the 30 fps they actually emit). That pinned it
-        // at 6-7 of 9 tiles and starved the rest to 0 fps; the realign churn on
-        // the starved tiles also flickered the mosaic. Now one grain is read
-        // per grain period: the next in order while within kLagGrains of the
-        // head, the freshest otherwise, so read/decode load stays at the flow
-        // rate regardless of writer speed, and a flow whose index jumps or
-        // restarts is picked up at its head.
-        auto period = next_grain::period(rate.numerator, rate.denominator);
+        // Every tile reads one grain per period of the mosaic's rate, off a
+        // monotonic clock: the next in order while within kLagGrains of the
+        // head, the freshest otherwise. A flow no faster than that rate is
+        // shown grain by grain, its grains repeated where it is slower; a
+        // faster one is sampled (next_grain::lag_for). A writer running ahead
+        // of real time costs no more reads than one that does not.
+        int const rateN = g_rate.numerator;
+        int const rateD = g_rate.denominator;
+        auto const period = next_grain::period(rateN, rateD);
+        // Ticks in a span of seconds at the mosaic's rate, rounded up.
+        auto const ticks = [rateN, rateD](int seconds) {
+            return static_cast<std::uint64_t>((static_cast<long long>(seconds) * rateN + rateD - 1) / rateD);
+        };
+        // The connected flow's lag, set when its reader opens.
+        std::int64_t lag = kLagGrains;
 
         g_print("[%zu] %s starting at rate %d/%d (paced %lld ns/grain)\n",
-            w->index, w->flowId.c_str(),
-            rate.numerator, rate.denominator,
+            w->index, w->flowId.c_str(), rateN, rateD,
             static_cast<long long>(period.count()));
 
         // Push the appsrc caps once before the first buffer. The capsfilter
@@ -350,13 +311,13 @@ namespace
             }
         }
         g_print("[%zu] %s caps %dx%d v210 @ %d/%d\n",
-            w->index, w->flowId.c_str(), vw, vh, rate.numerator, rate.denominator);
+            w->index, w->flowId.c_str(), vw, vh, rateN, rateD);
 
         auto* caps = ::gst_caps_new_simple("video/x-raw",
             "format", G_TYPE_STRING, "v210",
             "width", G_TYPE_INT, vw,
             "height", G_TYPE_INT, vh,
-            "framerate", GST_TYPE_FRACTION, rate.numerator, rate.denominator,
+            "framerate", GST_TYPE_FRACTION, rateN, rateD,
             nullptr);
         ::g_object_set(G_OBJECT(w->appsrc), "caps", caps, nullptr);
         ::gst_caps_unref(caps);
@@ -365,13 +326,13 @@ namespace
         // re-form, a gateway roll leaving a half-open RDMA endpoint -- while its
         // ring stays readable: the head index simply stops advancing and reads
         // keep returning the same stale grain forever, with no error to key
-        // off. Track the head; if it freezes for kStallReopen ticks (~2s at the
-        // grain rate), drop the reader so the guard at the loop top re-attaches
-        // it to the live ring. This is what insulates the compositor from
-        // upstream churn without an external restart.
+        // off. Track the head; if it freezes for 2 s of ticks, drop the reader
+        // so the guard at the loop top re-attaches it to the live ring. This is
+        // what insulates the compositor from upstream churn without an
+        // external restart.
         std::uint64_t lastHead = 0;
-        int stallTicks = 0;
-        constexpr int kStallReopen = 60;
+        std::uint64_t stallTicks = 0;
+        auto const kStallReopen = ticks(2);
         // Highest grain index already pushed downstream; the next read is the
         // grain after it. The freshest-grain scan below falls back to an older
         // grain when the head is briefly mid-write -- which, versus the
@@ -396,7 +357,7 @@ namespace
             std::memcpy(map.data, data, size);
             ::gst_buffer_unmap(buf, &map);
             GST_BUFFER_DURATION(buf) =
-                ::gst_util_uint64_scale_int(GST_SECOND, rate.denominator, rate.numerator);
+                ::gst_util_uint64_scale_int(GST_SECOND, rateD, rateN);
             GstFlowReturn ret = GST_FLOW_OK;
             ::g_signal_emit_by_name(w->appsrc, "push-buffer", buf, &ret);
             ::gst_buffer_unref(buf);
@@ -466,6 +427,8 @@ namespace
                     ::mxlCreateFlowReader(w->instance, w->flowId.c_str(), "", &w->reader) == MXL_STATUS_OK)
                 {
                     ::mxlFlowReaderGetConfigInfo(w->reader, &w->config);
+                    auto const flowRate = w->config.common.grainRate;
+                    lag = next_grain::lag_for(flowRate.numerator, flowRate.denominator, rateN, rateD, kLagGrains);
                     lastHead = 0;
                     stallTicks = 0;
                     lastShownIndex = -1;
@@ -503,27 +466,6 @@ namespace
                             continue;
                         }
                     }
-
-                    // A tile that started with nothing connected runs at the
-                    // mosaic's rate. The flow a controller connects later has
-                    // its own, and pacing, timestamps and caps follow it, or a
-                    // 50 fps flow is drawn at 29.97 for as long as it stays.
-                    if (auto const r = w->config.common.grainRate; r.numerator > 0 && r.denominator > 0 &&
-                        (r.numerator != rate.numerator || r.denominator != rate.denominator))
-                    {
-                        rate = r;
-                        period = next_grain::period(rate.numerator, rate.denominator);
-                        auto* newCaps = ::gst_caps_new_simple("video/x-raw",
-                            "format", G_TYPE_STRING, "v210",
-                            "width", G_TYPE_INT, vw,
-                            "height", G_TYPE_INT, vh,
-                            "framerate", GST_TYPE_FRACTION, rate.numerator, rate.denominator,
-                            nullptr);
-                        ::g_object_set(G_OBJECT(w->appsrc), "caps", newCaps, nullptr);
-                        ::gst_caps_unref(newCaps);
-                        g_print("[%zu] %s rate now %d/%d\n", w->index, w->flowId.c_str(),
-                            rate.numerator, rate.denominator);
-                    }
                 }
                 else
                 {
@@ -550,8 +492,8 @@ namespace
             {
                 if (++stallTicks >= kStallReopen)
                 {
-                    g_print("[%zu] %s head frozen %d ticks -- reopening reader\n",
-                        w->index, w->flowId.c_str(), stallTicks);
+                    g_print("[%zu] %s head frozen %llu ticks -- reopening reader\n",
+                        w->index, w->flowId.c_str(), static_cast<unsigned long long>(stallTicks));
                     ::mxlReleaseFlowReader(w->instance, w->reader);
                     w->reader = nullptr;
                     stallTicks = 0;
@@ -577,7 +519,7 @@ namespace
             int lastRet = 0;
             ::mxlGrainInfo lastInfo{};
             if (auto const want = haveIndex
-                    ? next_grain::after(lastShownIndex, static_cast<std::int64_t>(rt.headIndex), kLagGrains)
+                    ? next_grain::after(lastShownIndex, static_cast<std::int64_t>(rt.headIndex), lag)
                     : -1;
                 want >= 0)
             {
@@ -633,7 +575,7 @@ namespace
             if (!got)
             {
                 auto missed = w->framesMissed.fetch_add(1, std::memory_order_relaxed) + 1;
-                if (missed % 150 == 1)  // ~once / 5s: diagnose why nothing is readable
+                if (missed % ticks(5) == 1)  // once per 5 s: diagnose why nothing is readable
                     g_print("[%zu] %s no complete grain: head=%llu lastRet=%d "
                             "valid=%u total=%u flags=0x%x size=%zu\n",
                         w->index, w->flowId.c_str(),
@@ -683,7 +625,7 @@ namespace
             // mix it onto its canvas. Keep duration so the compositor can
             // estimate cadence.
             GST_BUFFER_DURATION(buf) =
-                ::gst_util_uint64_scale_int(GST_SECOND, rate.denominator, rate.numerator);
+                ::gst_util_uint64_scale_int(GST_SECOND, rateD, rateN);
 
             GstFlowReturn pushRet = GST_FLOW_OK;
             ::g_signal_emit_by_name(w->appsrc, "push-buffer", buf, &pushRet);
@@ -721,6 +663,17 @@ int main(int argc, char** argv)
     g_frameH = std::atoi(env_or("MXL_FRAME_HEIGHT", "1080").c_str());
     if (g_frameW <= 0 || g_frameH <= 0) { g_frameW = 1920; g_frameH = 1080; }
     g_print("Source tile resolution: %dx%d\n", g_frameW, g_frameH);
+    {
+        auto const rateText = env_or("MXL_GRAIN_RATE", "50/1");
+        auto const rate = grain_rate::parse(rateText);
+        if (!rate)
+        {
+            g_printerr("MXL_GRAIN_RATE is not a grain rate: %s\n", rateText.c_str());
+            return 2;
+        }
+        g_rate = *rate;
+    }
+    g_print("Grain rate: %d/%d\n", g_rate.numerator, g_rate.denominator);
     auto flowIds = split_ws(flowIdsStr);
 
     // MXL_TILES is the tile count where it exceeds the flows named: the
@@ -795,6 +748,9 @@ int main(int argc, char** argv)
         flowIds.size(), g_cols, g_rows, TILE_W, TILE_H, OUT_W, OUT_H, bitrateKbps,
         static_cast<long long>(g_grainBytes));
 
+    // Two seconds of grains, rounded up.
+    long long const gopGrains = (2LL * g_rate.numerator + g_rate.denominator - 1) / g_rate.denominator;
+
     // Build the pipeline as a single gst-launch-style description. compositor
     // has per-sink xpos/ypos/width/height set via pad properties; we write
     // them inline here so the result is one parse_launch call (no manual pad
@@ -822,35 +778,32 @@ int main(int argc, char** argv)
     pipelineDesc +=
         "! video/x-raw,format=I420,width=" + std::to_string(OUT_W) +
         ",height=" + std::to_string(OUT_H) +
-        // Half the 1080p50 house format: the mosaic is a preview, played out
-        // over WebRTC and HLS, and every tile still reads its flow at 50.
-        // An even divisor drops every other grain; 29.97 against 50 dropped
-        // an uneven pattern and cost more encode than this.
-        ",framerate=25/1 "
+        ",framerate=" + std::to_string(g_rate.numerator) + "/" + std::to_string(g_rate.denominator) + " "
         // Drop-old leaky queue right after the compositor so a brief
         // encoder hiccup doesn't backpropagate to the readers.
         "! queue leaky=downstream max-size-buffers=4 max-size-bytes=0 max-size-time=0 "
         "! videoconvert "
         // Quality knobs:
-        //  - speed-preset=faster: still real-time on a single core, but
-        //    gives x264 enough lookahead to make better mode decisions
-        //    than ultrafast. veryfast/faster is the usual broadcast-
-        //    sweet-spot for 720p30.
+        //  - speed-preset=superfast: x264 already spreads the encode over
+        //    sliced threads (tune=zerolatency), so the preset is what sets
+        //    its CPU. A 2x2 1080p mosaic took 5.3 cores at 25 fps under
+        //    faster, which doubles with the rate. ultrafast would drop CABAC
+        //    and deblocking.
         //  - bitrate: 6000 kbps at the 720p baseline, scaled linearly
         //    with canvas area (bitrateKbps above).
         //  - bframes=0: WebRTC cannot carry them. mediamtx accepts the
         //    stream, opens the peer connection, then closes it with
         //    "WebRTC doesn't support H264 streams with B-frames" and the
         //    viewer never sees a frame. HLS and SRT do not care either
-        //    way, and WHEP is how the showcase plays this out, so the
-        //    compression they would buy is not worth the delivery path.
+        //    way, so the compression they would buy is not worth losing
+        //    WebRTC.
         //  - profile=main: CABAC. WebRTC carries it; only B-frames are
         //    the problem, so the profile stays.
-        //  - key-int-max=50: 2 s GOP at 25 fps -- matches our HLS
-        //    segment cadence so I-frames align with segment boundaries.
-        "! x264enc speed-preset=faster tune=zerolatency "
+        //  - key-int-max: a 2 s GOP at the grain rate, the HLS segment
+        //    cadence, so I-frames align with segment boundaries.
+        "! x264enc speed-preset=superfast tune=zerolatency "
                   "bitrate=" + std::to_string(bitrateKbps) + " vbv-buf-capacity=2000 "
-                  "bframes=0 key-int-max=50 "
+                  "bframes=0 key-int-max=" + std::to_string(gopGrains) + " "
         "! video/x-h264,profile=main "
         // RTSP carries codec frames over RTP, not MPEG-TS. h264parse with
         // config-interval=-1 republishes SPS/PPS on every IDR so a viewer
@@ -870,7 +823,7 @@ int main(int argc, char** argv)
             " is-live=true format=time do-timestamp=true "
             " max-bytes=20971520 block=true "
             // Per-tile leaky queue absorbs short scheduler jitter without
-            // unbounded growth. 3 buffers ~ 60 ms at a tile's 50 fps.
+            // unbounded growth: 3 grain periods.
             "! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 "
             // No videoscale -- tiles composite at native source resolution.
             "! videoconvert "
@@ -931,6 +884,8 @@ int main(int argc, char** argv)
             env_or("NMOS_SYSTEM_PORT", env_or("NMOS_REGISTRY_PORT", "0").c_str()).c_str()));
         nc.frameWidth = g_frameW;
         nc.frameHeight = g_frameH;
+        nc.grainRateNumerator = g_rate.numerator;
+        nc.grainRateDenominator = g_rate.denominator;
         nc.connectionsConfigMap = env_or("NMOS_CONNECTIONS_CONFIGMAP", "");
         nc.stopping = [] { return g_exit.load(std::memory_order_relaxed); };
         if (nc.seed.empty())

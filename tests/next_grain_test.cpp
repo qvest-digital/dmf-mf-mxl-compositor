@@ -3,6 +3,7 @@
 
 #include "next_grain.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -23,13 +24,13 @@ namespace
     // The grains shown when each tick sees the given head, as the worker
     // reads them. A grain past the head is one the writer has not committed
     // within the tick, so the tick holds.
-    std::vector<std::int64_t> shown(std::vector<std::int64_t> const& heads)
+    std::vector<std::int64_t> shown(std::vector<std::int64_t> const& heads, std::int64_t maxLag = 2)
     {
         std::vector<std::int64_t> out;
         std::int64_t last = -1;
         for (auto head : heads)
         {
-            auto want = next_grain::after(last, head, 2);
+            auto want = next_grain::after(last, head, maxLag);
             if (want < 0) want = head > last ? head : -1;
             else if (want > head) want = -1;
             if (want >= 0) out.push_back(last = want);
@@ -67,10 +68,31 @@ int main()
     auto const behind = shown({10, 20, 21});
     check(behind.size() == 3 && behind[1] == 20 && behind[2] == 21, "catch up from far behind");
 
-    // A tile paces at its flow's rate, and at the mosaic's while none is set.
+    // A tile paces at one grain period of the mosaic's rate.
     check(next_grain::period(50, 1).count() == 20'000'000, "50 fps paces at 20 ms");
     check(next_grain::period(30000, 1001).count() == 33'366'666, "29.97 fps paces at 33.37 ms");
-    check(next_grain::period(0, 0).count() == 40'000'000, "an unset rate falls back to 25");
+
+    // Only a flow faster than the tick is sampled.
+    check(next_grain::lag_for(60, 1, 50, 1, 2) == 0, "60 on 50 is sampled");
+    check(next_grain::lag_for(60000, 1001, 50, 1, 2) == 0, "59.94 on 50 is sampled");
+    check(next_grain::lag_for(50, 1, 50, 1, 2) == 2, "50 on 50 is read in order");
+    check(next_grain::lag_for(30000, 1001, 50, 1, 2) == 2, "29.97 on 50 is read in order");
+    check(next_grain::lag_for(0, 0, 50, 1, 2) == 2, "a flow without a rate is read in order");
+
+    // A 60 fps flow ticked at 50: the head a tick sees moves by 1 or 2. In
+    // order, the reader falls behind until it jumps several grains at once;
+    // sampled, no step is more than the head's own.
+    std::vector<std::int64_t> heads;
+    for (int t = 0; t < 50; ++t) heads.push_back(100 + t * 6 / 5);
+    auto const sampled = shown(heads, next_grain::lag_for(60, 1, 50, 1, 2));
+    auto const inOrder = shown(heads, 2);
+    auto const maxStep = [](std::vector<std::int64_t> const& v) {
+        std::int64_t m = 0;
+        for (std::size_t i = 1; i < v.size(); ++i) m = std::max(m, v[i] - v[i - 1]);
+        return m;
+    };
+    check(maxStep(sampled) <= 2, "a faster flow drops grains one at a time");
+    check(maxStep(inOrder) > 2, "read in order, a faster flow jumps");
 
     if (failures == 0) std::puts("next_grain_test: ok");
     return failures == 0 ? 0 : 1;

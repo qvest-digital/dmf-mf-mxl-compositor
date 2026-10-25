@@ -45,8 +45,10 @@ namespace nmos_node
         // library reads the connected flow from IS-05, not from here. Every
         // domain id listed is one a controller may connect the Receiver in.
         std::string flow_def(std::string const& name, std::vector<std::string> const& domainIds,
-            std::string const& flowId, int w, int h)
+            std::string const& flowId, Config const& cfg)
         {
+            int const w = cfg.frameWidth;
+            int const h = cfg.frameHeight;
             std::string ids;
             for (auto const& id : domainIds) ids += (ids.empty() ? "\"" : ",\"") + id + "\"";
             std::ostringstream o;
@@ -58,7 +60,8 @@ namespace nmos_node
               << "\"urn:x-nvnmos:tag:mxl-domain-id\":[" << ids << "]},"
               << "\"format\":\"urn:x-nmos:format:video\","
               << "\"media_type\":\"video/v210\","
-              << "\"grain_rate\":{\"numerator\":30000,\"denominator\":1001},"
+              << "\"grain_rate\":{\"numerator\":" << cfg.grainRateNumerator
+              << ",\"denominator\":" << cfg.grainRateDenominator << "},"
               << "\"frame_width\":" << w << ","
               << "\"frame_height\":" << h << ","
               << "\"interlace_mode\":\"progressive\","
@@ -240,8 +243,7 @@ namespace nmos_node
         for (std::size_t i = 0; i < slots.size(); ++i)
         {
             node->names.push_back(receiver_name(i));
-            node->flowDefs.push_back(flow_def(node->names.back(), domainIds, "",
-                cfg.frameWidth, cfg.frameHeight));
+            node->flowDefs.push_back(flow_def(node->names.back(), domainIds, "", cfg));
         }
 
         // nmos-cpp listens on every address, and on its own Connection API
@@ -333,7 +335,7 @@ namespace nmos_node
                     node->names[i].c_str(), source.flow.c_str(), source.domain.c_str());
                 continue;
             }
-            auto def = flow_def(node->names[i], {domainId}, source.flow, cfg.frameWidth, cfg.frameHeight);
+            auto def = flow_def(node->names[i], {domainId}, source.flow, cfg);
             if (!nmos_connection_activate(&node->server, NVNMOS_SIDE_RECEIVER,
                     node->names[i].c_str(), def.c_str()))
                 g_printerr("nmos: could not report %s as showing %s\n",
