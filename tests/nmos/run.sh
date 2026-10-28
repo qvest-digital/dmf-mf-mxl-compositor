@@ -95,46 +95,64 @@ fi
 # its Flow satisfies one of the sets -- a Sender must not produce a stream its
 # capabilities exclude. A constraint is evaluated where the Flow or its Source
 # carries the attribute the capabilities register targets; media_type always.
+# The compositor registers no Senders, so here the check has nothing to hold
+# to account; it runs against every Sender the registry lists, so a Sender
+# added to the compositor is checked without changing this.
 caps_rc=0
-sender_caps=$(jq -n -r --argjson s "$(query senders/)" --argjson f "$(query flows/)" \
-    --argjson src "$(query sources/)" '
-  def r: if type == "object" then [.numerator, (.denominator // 1)] else . end;
-  def eq($a; $b): ($a | r) as $x | ($b | r) as $y
-    | if ($x | type) == "array" then $x[0] * $y[1] == $y[0] * $x[1] else $x == $y end;
-  ($f | map({key: .id, value: .}) | from_entries) as $flows
-  | ($src | map({key: .id, value: .}) | from_entries) as $sources
-  | $s[] | . as $snd
-  | if (.caps.constraint_sets | length) == 0 or (.caps.version | not) then
-      "\(.id) carries no constraint_sets and version: \(.caps)"
-    elif .flow_id == null then empty
-    else $flows[.flow_id] as $fl | ($sources[$fl.source_id] // {}) as $so
-      | {"urn:x-nmos:cap:format:media_type": $fl.media_type,
-         "urn:x-nmos:cap:format:grain_rate": $fl.grain_rate,
-         "urn:x-nmos:cap:format:frame_width": $fl.frame_width,
-         "urn:x-nmos:cap:format:frame_height": $fl.frame_height,
-         "urn:x-nmos:cap:format:interlace_mode":
-           (if $fl.format == "urn:x-nmos:format:video" then ($fl.interlace_mode // "progressive") else null end),
-         "urn:x-nmos:cap:format:colorspace": $fl.colorspace,
-         "urn:x-nmos:cap:format:transfer_characteristic":
-           (if $fl.format == "urn:x-nmos:format:video" then ($fl.transfer_characteristic // "SDR") else null end),
-         "urn:x-nmos:cap:format:sample_rate": $fl.sample_rate,
-         "urn:x-nmos:cap:format:channel_count": ($so.channels // null | if . then length else null end),
-         "urn:x-nmos:cap:format:sample_depth": $fl.bit_depth} as $attrs
-      | if any($snd.caps.constraint_sets[];
-          . as $set | ($set["urn:x-nmos:cap:format:media_type"] != null)
-          and all($set | to_entries[] | select(.key | startswith("urn:x-nmos:cap:meta:") | not);
-            .key as $k | .value as $c | $attrs[$k] as $v
-            | ($v == null) or ($c.enum == null) or any($c.enum[]; eq(.; $v))))
-        then empty
-        else "\($snd.id) flow \($fl.id) satisfies none of \($snd.caps.constraint_sets)" end
-    end')
-[ "$(query senders/ | jq length)" -gt 0 ] || sender_caps="no senders registered"
-if [ -n "$sender_caps" ]; then
-  echo "FAIL sender caps"
-  sed 's/^/    /' <<<"$sender_caps"
-  caps_rc=1
+nsenders=$(query senders/ | jq length)
+if [ "${nsenders:-0}" -eq 0 ]; then
+  echo "SKIP sender caps (the compositor registers no Senders)"
 else
-  echo "PASS sender caps ($(query senders/ | jq length) senders)"
+  sender_caps=$(jq -n -r --argjson s "$(query senders/)" --argjson f "$(query flows/)" \
+      --argjson src "$(query sources/)" --argjson ids '[]' '
+    def r: if type == "object" then [.numerator, (.denominator // 1)] else . end;
+    def eq($a; $b): ($a | r) as $x | ($b | r) as $y
+      | if ($x | type) == "array" then $x[0] * $y[1] == $y[0] * $x[1] else $x == $y end;
+    # color_sampling and component_depth from the components of a video Flow, as
+    # the capabilities register targets them; null where it carries none.
+    def sampling: (.components // []) as $c
+      | if ($c | length) != 3 then null
+        elif $c[0].name == "R" then "RGB"
+        elif $c[1].width == $c[0].width and $c[1].height == $c[0].height then "YCbCr-4:4:4"
+        elif $c[1].width * 2 == $c[0].width and $c[1].height == $c[0].height then "YCbCr-4:2:2"
+        elif $c[1].width * 2 == $c[0].width and $c[1].height * 2 == $c[0].height then "YCbCr-4:2:0"
+        else null end;
+    ($f | map({key: .id, value: .}) | from_entries) as $flows
+    | ($src | map({key: .id, value: .}) | from_entries) as $sources
+    | $s[] | select(($ids | length) == 0 or (.id as $i | $ids | index($i))) | . as $snd
+    | if (.caps.constraint_sets | length) == 0 or (.caps.version | not) then
+        "\(.id) carries no constraint_sets and version: \(.caps)"
+      elif .flow_id == null then empty
+      elif ($flows[.flow_id] // null) == null then "\(.id) references flow \(.flow_id), which is not registered"
+      else $flows[.flow_id] as $fl | ($sources[$fl.source_id] // {}) as $so
+        | (if $fl.format == "urn:x-nmos:format:video" then 1 else null end) as $video
+        | {"urn:x-nmos:cap:format:media_type": $fl.media_type,
+           "urn:x-nmos:cap:format:grain_rate": $fl.grain_rate,
+           "urn:x-nmos:cap:format:frame_width": $fl.frame_width,
+           "urn:x-nmos:cap:format:frame_height": $fl.frame_height,
+           "urn:x-nmos:cap:format:interlace_mode": (if $video then ($fl.interlace_mode // "progressive") else null end),
+           "urn:x-nmos:cap:format:colorspace": $fl.colorspace,
+           "urn:x-nmos:cap:format:transfer_characteristic": (if $video then ($fl.transfer_characteristic // "SDR") else null end),
+           "urn:x-nmos:cap:format:color_sampling": (if $video then ($fl | sampling) else null end),
+           "urn:x-nmos:cap:format:component_depth": (if $video then $fl.components[0].bit_depth? else null end),
+           "urn:x-nmos:cap:format:sample_rate": $fl.sample_rate,
+           "urn:x-nmos:cap:format:channel_count": ($so.channels // null | if . then length else null end),
+           "urn:x-nmos:cap:format:sample_depth": (if $video then null else $fl.bit_depth end)} as $attrs
+        | if any($snd.caps.constraint_sets[];
+            . as $set | ($set["urn:x-nmos:cap:format:media_type"] != null)
+            and all($set | to_entries[] | select(.key | startswith("urn:x-nmos:cap:meta:") | not);
+              .key as $k | .value as $c | $attrs[$k] as $v
+              | ($v == null) or ($c.enum == null) or any($c.enum[]; eq(.; $v))))
+          then empty
+          else "\($snd.id) flow \($fl.id) satisfies none of \($snd.caps.constraint_sets)" end
+      end')
+  if [ -n "$sender_caps" ]; then
+    echo "FAIL sender caps"
+    sed 's/^/    /' <<<"$sender_caps"
+    caps_rc=1
+  else
+    echo "PASS sender caps ($nsenders senders)"
+  fi
 fi
 
 # Every tile can be connected in either domain, and in no other: its
