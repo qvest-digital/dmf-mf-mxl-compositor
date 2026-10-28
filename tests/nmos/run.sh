@@ -104,22 +104,22 @@ if [ "${nsenders:-0}" -eq 0 ]; then
   echo "SKIP sender caps (the compositor registers no Senders)"
 else
   sender_caps=$(jq -n -r --argjson s "$(query senders/)" --argjson f "$(query flows/)" \
-      --argjson src "$(query sources/)" --argjson ids '[]' '
+      --argjson src "$(query sources/)" '
     def r: if type == "object" then [.numerator, (.denominator // 1)] else . end;
     def eq($a; $b): ($a | r) as $x | ($b | r) as $y
       | if ($x | type) == "array" then $x[0] * $y[1] == $y[0] * $x[1] else $x == $y end;
     # color_sampling and component_depth from the components of a video Flow, as
     # the capabilities register targets them; null where it carries none.
     def sampling: (.components // []) as $c
-      | if ($c | length) != 3 then null
-        elif $c[0].name == "R" then "RGB"
+      | if ($c | map(.name)) == ["R", "G", "B"] then "RGB"
+        elif ($c | map(.name)) != ["Y", "Cb", "Cr"] then null
         elif $c[1].width == $c[0].width and $c[1].height == $c[0].height then "YCbCr-4:4:4"
         elif $c[1].width * 2 == $c[0].width and $c[1].height == $c[0].height then "YCbCr-4:2:2"
         elif $c[1].width * 2 == $c[0].width and $c[1].height * 2 == $c[0].height then "YCbCr-4:2:0"
         else null end;
     ($f | map({key: .id, value: .}) | from_entries) as $flows
     | ($src | map({key: .id, value: .}) | from_entries) as $sources
-    | $s[] | select(($ids | length) == 0 or (.id as $i | $ids | index($i))) | . as $snd
+    | $s[] | . as $snd
     | if (.caps.constraint_sets | length) == 0 or (.caps.version | not) then
         "\(.id) carries no constraint_sets and version: \(.caps)"
       elif .flow_id == null then empty
@@ -127,7 +127,7 @@ else
       else $flows[.flow_id] as $fl | ($sources[$fl.source_id] // {}) as $so
         | (if $fl.format == "urn:x-nmos:format:video" then 1 else null end) as $video
         | {"urn:x-nmos:cap:format:media_type": $fl.media_type,
-           "urn:x-nmos:cap:format:grain_rate": $fl.grain_rate,
+           "urn:x-nmos:cap:format:grain_rate": ($fl.grain_rate // $so.grain_rate),
            "urn:x-nmos:cap:format:frame_width": $fl.frame_width,
            "urn:x-nmos:cap:format:frame_height": $fl.frame_height,
            "urn:x-nmos:cap:format:interlace_mode": (if $video then ($fl.interlace_mode // "progressive") else null end),
