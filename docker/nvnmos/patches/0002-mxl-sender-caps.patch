@@ -1,0 +1,69 @@
+diff --git a/src/nvnmos_impl.cpp b/src/nvnmos_impl.cpp
+index 419c956..0d1ed34 100644
+--- a/src/nvnmos_impl.cpp
++++ b/src/nvnmos_impl.cpp
+@@ -659,6 +659,9 @@ namespace nvnmos
+ 
+         nmos::resource source;
+         nmos::resource flow;
++        // BCP-004-02: the sender writes exactly the flow its flow definition
++        // describes, so its one constraint set states that flow
++        web::json::value constraint_set;
+ 
+         if (impl::format::video == format)
+         {
+@@ -688,6 +691,19 @@ namespace nvnmos
+                 media_type,
+                 settings
+             );
++
++            // an absent interlace_mode or transfer_characteristic is the IS-04 default
++            constraint_set = value_of({
++                { nmos::caps::format::media_type, nmos::make_caps_string_constraint({ media_type.name }) },
++                { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ grain_rate }) },
++                { nmos::caps::format::frame_width, nmos::make_caps_integer_constraint({ frame_width }) },
++                { nmos::caps::format::frame_height, nmos::make_caps_integer_constraint({ frame_height }) },
++                { nmos::caps::format::interlace_mode, nmos::make_caps_string_constraint({ !interlace_mode.name.empty() ? interlace_mode.name : nmos::interlace_modes::progressive.name }) },
++                { nmos::caps::format::colorspace, nmos::make_caps_string_constraint({ colorspace.name }) },
++                { nmos::caps::format::transfer_characteristic, nmos::make_caps_string_constraint({ !transfer_characteristic.name.empty() ? transfer_characteristic.name : nmos::transfer_characteristics::SDR.name }) },
++                { nmos::caps::format::color_sampling, nmos::make_caps_string_constraint({ sampling.name }) },
++                { nmos::caps::format::component_depth, nmos::make_caps_integer_constraint({ bit_depth }) }
++            });
+         }
+         else if (impl::format::audio == format)
+         {
+@@ -706,6 +722,13 @@ namespace nvnmos
+             source = nmos::make_audio_source(source_id, device_id, clock, sample_rate, channels, settings);
+             flow = nmos::make_raw_audio_flow(flow_id, source_id, device_id, sample_rate, bit_depth, settings);
+             flow.data[nmos::fields::media_type] = value::string(media_type.name);
++
++            constraint_set = value_of({
++                { nmos::caps::format::media_type, nmos::make_caps_string_constraint({ media_type.name }) },
++                { nmos::caps::format::channel_count, nmos::make_caps_integer_constraint({ channel_count }) },
++                { nmos::caps::format::sample_rate, nmos::make_caps_rational_constraint({ sample_rate }) },
++                { nmos::caps::format::sample_depth, nmos::make_caps_integer_constraint({ bit_depth }) }
++            });
+         }
+         else if (impl::format::data == format)
+         {
+@@ -714,6 +737,11 @@ namespace nvnmos
+             source = nmos::make_data_source(source_id, device_id, clock, grain_rate, settings);
+             flow = nmos::make_sdianc_data_flow(flow_id, source_id, device_id, {}, settings);
+             flow.data[nmos::fields::grain_rate] = nmos::make_rational(grain_rate);
++
++            constraint_set = value_of({
++                { nmos::caps::format::media_type, nmos::make_caps_string_constraint({ nmos::fields::media_type(flow.data) }) },
++                { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ grain_rate }) }
++            });
+         }
+         else // e.g. if (impl::format::mux == format)
+         {
+@@ -722,6 +750,8 @@ namespace nvnmos
+ 
+         // MXL sender: no manifest_href (no /transportfile), no interface_bindings
+         auto sender = nmos::make_sender(sender_id, flow_id, nmos::transports::mxl, device_id, {}, {}, settings);
++        sender.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({ constraint_set });
++        sender.data[nmos::fields::caps][nmos::fields::version] = sender.data[nmos::fields::version];
+ 
+         auto connection_sender = nmos::make_connection_mxl_sender(sender_id, mxl_domain_id, mxl_flow_id);
+ 

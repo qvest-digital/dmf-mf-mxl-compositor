@@ -91,6 +91,52 @@ else
   hrefs_rc=0
 fi
 
+# BCP-004-02: every Sender carries constraint_sets and a caps version, and
+# its Flow satisfies one of the sets -- a Sender must not produce a stream its
+# capabilities exclude. A constraint is evaluated where the Flow or its Source
+# carries the attribute the capabilities register targets; media_type always.
+caps_rc=0
+sender_caps=$(jq -n -r --argjson s "$(query senders/)" --argjson f "$(query flows/)" \
+    --argjson src "$(query sources/)" '
+  def r: if type == "object" then [.numerator, (.denominator // 1)] else . end;
+  def eq($a; $b): ($a | r) as $x | ($b | r) as $y
+    | if ($x | type) == "array" then $x[0] * $y[1] == $y[0] * $x[1] else $x == $y end;
+  ($f | map({key: .id, value: .}) | from_entries) as $flows
+  | ($src | map({key: .id, value: .}) | from_entries) as $sources
+  | $s[] | . as $snd
+  | if (.caps.constraint_sets | length) == 0 or (.caps.version | not) then
+      "\(.id) carries no constraint_sets and version: \(.caps)"
+    elif .flow_id == null then empty
+    else $flows[.flow_id] as $fl | ($sources[$fl.source_id] // {}) as $so
+      | {"urn:x-nmos:cap:format:media_type": $fl.media_type,
+         "urn:x-nmos:cap:format:grain_rate": $fl.grain_rate,
+         "urn:x-nmos:cap:format:frame_width": $fl.frame_width,
+         "urn:x-nmos:cap:format:frame_height": $fl.frame_height,
+         "urn:x-nmos:cap:format:interlace_mode":
+           (if $fl.format == "urn:x-nmos:format:video" then ($fl.interlace_mode // "progressive") else null end),
+         "urn:x-nmos:cap:format:colorspace": $fl.colorspace,
+         "urn:x-nmos:cap:format:transfer_characteristic":
+           (if $fl.format == "urn:x-nmos:format:video" then ($fl.transfer_characteristic // "SDR") else null end),
+         "urn:x-nmos:cap:format:sample_rate": $fl.sample_rate,
+         "urn:x-nmos:cap:format:channel_count": ($so.channels // null | if . then length else null end),
+         "urn:x-nmos:cap:format:sample_depth": $fl.bit_depth} as $attrs
+      | if any($snd.caps.constraint_sets[];
+          . as $set | ($set["urn:x-nmos:cap:format:media_type"] != null)
+          and all($set | to_entries[] | select(.key | startswith("urn:x-nmos:cap:meta:") | not);
+            .key as $k | .value as $c | $attrs[$k] as $v
+            | ($v == null) or ($c.enum == null) or any($c.enum[]; eq(.; $v))))
+        then empty
+        else "\($snd.id) flow \($fl.id) satisfies none of \($snd.caps.constraint_sets)" end
+    end')
+[ "$(query senders/ | jq length)" -gt 0 ] || sender_caps="no senders registered"
+if [ -n "$sender_caps" ]; then
+  echo "FAIL sender caps"
+  sed 's/^/    /' <<<"$sender_caps"
+  caps_rc=1
+else
+  echo "PASS sender caps ($(query senders/ | jq length) senders)"
+fi
+
 # Every tile can be connected in either domain, and in no other: its
 # mxl_domain_id constraint lists both, and a PATCH naming another is refused
 # by IS-05 before the compositor sees it.
@@ -187,7 +233,7 @@ restart_compositor || { echo "FAIL the compositor did not come back"; restore_rc
 suites=("$@")
 [ ${#suites[@]} -gt 0 ] || suites=(IS-04-01 IS-05-01 IS-05-02 BCP-007-03-01)
 
-rc=$((hrefs_rc | domains_rc | restore_rc))
+rc=$((hrefs_rc | caps_rc | domains_rc | restore_rc))
 for suite in "${suites[@]}"; do
   case "$suite" in
     IS-04-01)      args=(--host "$NODE" --port "$PORT" --version v1.3) ;;
