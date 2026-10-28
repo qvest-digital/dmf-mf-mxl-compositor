@@ -127,7 +127,8 @@ configs:
     content: |
       {"label":"lane","http_port":8010,"query_ws_port":8011,"logging_level":0,
        "href_mode":2,"host_address":"172.30.99.10","host_addresses":["172.30.99.10"],
-       "seed_id":"b6c4f4a0-9c1e-5a3d-8f2b-0d51c8e4a710"}
+       "seed_id":"b6c4f4a0-9c1e-5a3d-8f2b-0d51c8e4a710",
+       "query_paging_default":1000,"query_paging_limit":1000}
   testing-config:
     content: |
       from . import Config as CONFIG
