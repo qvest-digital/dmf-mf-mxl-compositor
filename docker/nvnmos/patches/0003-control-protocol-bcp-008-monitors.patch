@@ -1,0 +1,688 @@
+diff --git a/src/nvnmos.cpp b/src/nvnmos.cpp
+index 63df945..cf12779 100644
+--- a/src/nvnmos.cpp
++++ b/src/nvnmos.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "nvnmos.h"
+ 
++#include <algorithm>
+ #include <cstdlib>
+ #include <cstring>
+ #include <boost/algorithm/string/join.hpp>
+@@ -35,6 +36,12 @@
+ #include <boost/range/iterator_range_core.hpp>
+ #include "cpprest/host_utils.h"
+ #include "nmos/asset.h"
++#include "nmos/control_protocol_behaviour.h"
++#include "nmos/control_protocol_handlers.h"
++#include "nmos/control_protocol_resource.h"
++#include "nmos/control_protocol_resources.h"
++#include "nmos/control_protocol_state.h"
++#include "nmos/control_protocol_utils.h"
+ #include "nmos/log_gate.h"
+ #include "nmos/mdns.h"
+ #include "nmos/model.h"
+@@ -232,7 +239,7 @@ namespace nvnmos
+     class server
+     {
+     public:
+-        server(const NvNmosNodeConfig& config, NvNmosNodeServer* server);
++        server(const NvNmosNodeConfig& config, const NvNmosControlProtocolConfig* control_config, NvNmosNodeServer* server);
+         ~server();
+ 
+         void add_receiver(const NvNmosReceiverConfig& config);
+@@ -246,6 +253,8 @@ namespace nvnmos
+         void activate_connection(const nmos::type& type, const std::string& name, const std::string& transport_file);
+         void activate_channelmapping(const std::string& name, const std::string& output_id, const NvNmosChannelMappingActiveMapEntry* active_map, size_t num_active_map);
+ 
++        void set_monitor_status(const nmos::type& type, const std::string& name, NvNmosMonitorDomain domain, int status, const std::string& message);
++
+         nmos::id node_id() const;
+         nmos::id device_id() const;
+         nmos::id sender_id(const std::string& sender_name) const;
+@@ -257,16 +266,36 @@ namespace nvnmos
+         static nmos::settings make_settings(const NvNmosNodeConfig& config);
+         void log_current_exception();
+ 
++        // BCP-008 monitors, with the control protocol only
++        void insert_device_model();
++        void update_monitors();
++        void update_monitors(const nmos::type& type, nmos::nc_oid block_oid);
++        void activate_monitor(const nmos::type& type, const nvnmos::name& name);
++        bool find_monitor_target(const nmos::resource& monitor, NvNmosSide& side, std::string& name) const;
++        std::vector<nmos::nc::counter> monitor_counters(const nmos::resource& monitor, NvNmosMonitorCounters which) const;
++        void reset_monitor_counters(const nmos::resource& monitor) const;
++
++        NvNmosNodeServer* c_server;
++        NvNmosControlProtocolConfig control_config;
++
+         nmos::node_model node_model;
+         nmos::experimental::log_model log_model;
+         log_gate gate;
+ 
++        std::unique_ptr<nmos::experimental::control_protocol_state> control_protocol_state;
++        nmos::control_protocol_connection_activation_handler monitor_activated;
++        nmos::nc_oid next_oid = nmos::root_block_oid;
++        nmos::nc_oid sender_monitors_oid = 0;
++        nmos::nc_oid receiver_monitors_oid = 0;
++
+         nmos::experimental::node_implementation node_implementation;
+         std::unique_ptr<nmos::server> node_server;
+     };
+ 
+-    server::server(const NvNmosNodeConfig& config, NvNmosNodeServer* server)
+-        : gate(server, config.log_callback, log_model)
++    server::server(const NvNmosNodeConfig& config, const NvNmosControlProtocolConfig* control_config, NvNmosNodeServer* server)
++        : c_server(server)
++        , control_config(control_config ? *control_config : NvNmosControlProtocolConfig{})
++        , gate(server, config.log_callback, log_model)
+     {
+         using web::json::value_of;
+ 
+@@ -275,6 +304,10 @@ namespace nvnmos
+             // Prepare settings
+ 
+             node_model.settings = make_settings(config);
++            if (control_config)
++            {
++                node_model.settings[nmos::fields::control_protocol_ws_port] = web::json::value::number(0 != control_config->port ? control_config->port : 3218);
++            }
+ 
+             log_model.settings = node_model.settings;
+             log_model.level = nmos::fields::logging_level(log_model.settings);
+@@ -333,10 +366,31 @@ namespace nvnmos
+             };
+             node_implementation = make_node_implementation(node_model, connection_activated_handler, channelmapping_activated_handler, gate);
+ 
++            if (control_config)
++            {
++                // a Sender's monitor asks for its transmission error counters through the lost packet counters handler
++                control_protocol_state.reset(new nmos::experimental::control_protocol_state(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
++                    [this](const nmos::resource& monitor) { return monitor_counters(monitor, nmos::nc::is_sender_monitor(nmos::nc::details::parse_class_id(nmos::fields::nc::class_id(monitor.data))) ? NVNMOS_MONITOR_COUNTERS_TRANSMISSION_ERROR : NVNMOS_MONITOR_COUNTERS_LOST); },
++                    [this](const nmos::resource& monitor) { return monitor_counters(monitor, NVNMOS_MONITOR_COUNTERS_LATE); },
++                    [this](const nmos::resource& monitor) { reset_monitor_counters(monitor); }));
++                monitor_activated = nmos::make_monitor_connection_activation_handler(node_model.control_protocol_resources, *control_protocol_state, gate);
++                node_implementation
++                    .on_get_control_class_descriptor(nmos::make_get_control_protocol_class_descriptor_handler(*control_protocol_state))
++                    .on_get_control_datatype_descriptor(nmos::make_get_control_protocol_datatype_descriptor_handler(*control_protocol_state))
++                    .on_get_control_protocol_method_descriptor(nmos::make_get_control_protocol_method_descriptor_handler(*control_protocol_state))
++                    .on_monitor_activated(monitor_activated);
++            }
++
+             // Set up the node server
+ 
+             node_server.reset(new nmos::server(nmos::experimental::make_node_server(node_model, node_implementation, log_model, gate)));
+ 
++            if (control_protocol_state)
++            {
++                // applies statusReportingDelay to pending monitor statuses
++                node_server->thread_functions.push_back([&] { nmos::experimental::control_protocol_behaviour_thread(node_model, *control_protocol_state, gate); });
++            }
++
+             // Disable TRACE method
+ 
+             for (auto& http_listener : node_server->http_listeners)
+@@ -347,6 +401,7 @@ namespace nvnmos
+             // Set up the node resources, etc.
+ 
+             node_implementation_init(node_model, gate);
++            insert_device_model();
+ 
+             {
+                 const auto urls = impl::make_api_base_urls(node_model.settings);
+@@ -365,6 +420,8 @@ namespace nvnmos
+                 node_implementation_add_sender(node_model, make_transport(sender.transport), sender.transport_file, gate);
+             }
+ 
++            update_monitors();
++
+             // Open the API ports and start up node operation (including the DNS-SD advertisements)
+ 
+             slog::log<slog::severities::info>(gate, SLOG_FLF) << "Preparing for connections";
+@@ -643,6 +700,7 @@ namespace nvnmos
+         {
+             if (!config.transport_file) throw std::logic_error("invalid receiver config");
+             node_implementation_add_receiver(node_model, make_transport(config.transport), config.transport_file, gate);
++            update_monitors();
+         }
+         catch (...)
+         {
+@@ -656,6 +714,7 @@ namespace nvnmos
+         try
+         {
+             node_implementation_remove_receiver(node_model, utility::s2us(receiver_name), gate);
++            update_monitors();
+         }
+         catch (...)
+         {
+@@ -672,6 +731,7 @@ namespace nvnmos
+         {
+             if (!config.transport_file) throw std::logic_error("invalid sender config");
+             node_implementation_add_sender(node_model, make_transport(config.transport), config.transport_file, gate);
++            update_monitors();
+         }
+         catch (...)
+         {
+@@ -685,6 +745,7 @@ namespace nvnmos
+         try
+         {
+             node_implementation_remove_sender(node_model, utility::s2us(sender_name), gate);
++            update_monitors();
+         }
+         catch (...)
+         {
+@@ -724,6 +785,7 @@ namespace nvnmos
+         try
+         {
+             node_implementation_activate_connection(node_model, type, utility::s2us(name), transport_file, gate);
++            activate_monitor(type, utility::s2us(name));
+         }
+         catch (...)
+         {
+@@ -745,6 +807,204 @@ namespace nvnmos
+         }
+     }
+ 
++    void server::insert_device_model()
++    {
++        if (!control_protocol_state) return;
++
++        auto lock = node_model.write_lock();
++
++        auto root_block = nmos::make_root_block();
++        auto device_manager = nmos::make_device_manager(++next_oid, node_model.settings);
++        auto class_manager = nmos::make_class_manager(++next_oid, *control_protocol_state);
++        receiver_monitors_oid = ++next_oid;
++        auto receiver_monitors = nmos::make_block(receiver_monitors_oid, nmos::root_block_oid, U("receiver-monitors"), U("Receiver Monitors"), U("Receiver Monitors"));
++        sender_monitors_oid = ++next_oid;
++        auto sender_monitors = nmos::make_block(sender_monitors_oid, nmos::root_block_oid, U("sender-monitors"), U("Sender Monitors"), U("Sender Monitors"));
++
++        nmos::nc::push_back(root_block, device_manager);
++        nmos::nc::push_back(root_block, class_manager);
++        nmos::nc::push_back(root_block, receiver_monitors);
++        nmos::nc::push_back(root_block, sender_monitors);
++        nmos::nc::insert_root(node_model.control_protocol_resources, root_block);
++
++        node_model.notify();
++    }
++
++    // Gives every sender and receiver a monitor and removes the monitors of those that are gone.
++    void server::update_monitors()
++    {
++        if (!control_protocol_state) return;
++
++        auto lock = node_model.write_lock();
++
++        update_monitors(nmos::types::sender, sender_monitors_oid);
++        update_monitors(nmos::types::receiver, receiver_monitors_oid);
++
++        node_model.notify();
++    }
++
++    void server::update_monitors(const nmos::type& type, nmos::nc_oid block_oid)
++    {
++        using web::json::value;
++        using web::json::value_of;
++
++        auto& resources = node_model.control_protocol_resources;
++        const bool sender = nmos::types::sender == type;
++        const auto touchpoint_type = sender ? nmos::ncp_touchpoint_resource_types::sender : nmos::ncp_touchpoint_resource_types::receiver;
++        bool changed = false;
++
++        for (const auto& resource : node_model.node_resources)
++        {
++            if (type != resource.type || !resource.has_data()) continue;
++            if (resources.end() != nmos::nc::find_resource(resources, nmos::types::nc_status_monitor, resource.id)) continue;
++
++            const auto oid = ++next_oid;
++            const auto role = (sender ? U("sender-monitor-") : U("receiver-monitor-")) + impl::get_name(resource);
++            const auto touchpoints = value_of({ nmos::nc::details::make_touchpoint_nmos({ touchpoint_type, resource.id }) });
++            auto monitor = sender
++                ? nmos::make_sender_monitor(oid, true, block_oid, role, nmos::fields::label(resource.data), nmos::fields::description(resource.data), touchpoints)
++                : nmos::make_receiver_monitor(oid, true, block_oid, role, nmos::fields::label(resource.data), nmos::fields::description(resource.data), touchpoints);
++            nmos::nc::insert_resource(resources, std::move(monitor));
++            changed = true;
++        }
++
++        std::vector<nmos::id> gone;
++        for (const auto& monitor : resources)
++        {
++            if (nmos::types::nc_status_monitor != monitor.type || !monitor.has_data()) continue;
++            if (block_oid != nmos::fields::nc::owner(monitor.data)) continue;
++            const auto& touchpoints = nmos::fields::nc::touchpoints(monitor.data);
++            const bool target_exists = 0 != touchpoints.size()
++                && node_model.node_resources.end() != nmos::find_resource(node_model.node_resources, { nmos::fields::nc::id(nmos::fields::nc::resource(touchpoints.at(0))).as_string(), type });
++            if (!target_exists) gone.push_back(monitor.id);
++        }
++        for (const auto& id : gone)
++        {
++            nmos::nc::erase_resource(resources, id);
++            changed = true;
++        }
++
++        if (!changed) return;
++
++        // the block's members are its monitors, in order of their oids
++        auto members = value::array();
++        for (const auto& monitor : resources)
++        {
++            if (nmos::types::nc_status_monitor != monitor.type || !monitor.has_data()) continue;
++            if (block_oid != nmos::fields::nc::owner(monitor.data)) continue;
++            web::json::push_back(members, nmos::nc::details::make_block_member_descriptor(nmos::fields::description(monitor.data), nmos::fields::nc::role(monitor.data), nmos::fields::nc::oid(monitor.data), true, nmos::nc::details::parse_class_id(nmos::fields::nc::class_id(monitor.data)), nmos::fields::nc::user_label(monitor.data), block_oid));
++        }
++        nmos::nc::modify_resource(resources, utility::conversions::details::to_string_t(block_oid), [&](nmos::resource& block)
++        {
++            block.data[nmos::fields::nc::members] = members;
++        }, nmos::nc::make_property_changed_event(block_oid, { { nmos::nc_block_members_property_id, nmos::nc_property_change_type::type::value_changed, members } }));
++    }
++
++    // An activation through nmos_connection_activate does not pass the connection activation thread, which activates monitors.
++    void server::activate_monitor(const nmos::type& type, const nvnmos::name& name)
++    {
++        if (!control_protocol_state) return;
++
++        auto lock = node_model.write_lock();
++
++        const auto id = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), type, name);
++        const auto resource = nmos::find_resource(node_model.node_resources, { id, type });
++        const auto connection_resource = nmos::find_resource(node_model.connection_resources, { id, type });
++        if (node_model.node_resources.end() == resource || node_model.connection_resources.end() == connection_resource) return;
++
++        monitor_activated(*resource, *connection_resource);
++
++        node_model.notify();
++    }
++
++    bool server::find_monitor_target(const nmos::resource& monitor, NvNmosSide& side, std::string& name) const
++    {
++        const auto& touchpoints = nmos::fields::nc::touchpoints(monitor.data);
++        if (0 == touchpoints.size()) return false;
++        const auto& id = nmos::fields::nc::id(nmos::fields::nc::resource(touchpoints.at(0))).as_string();
++        for (const auto& type : { nmos::types::sender, nmos::types::receiver })
++        {
++            const auto resource = nmos::find_resource(node_model.node_resources, { id, type });
++            if (node_model.node_resources.end() == resource) continue;
++            side = side_from_type(type);
++            name = utility::us2s(impl::get_name(*resource));
++            return true;
++        }
++        return false;
++    }
++
++    std::vector<nmos::nc::counter> server::monitor_counters(const nmos::resource& monitor, NvNmosMonitorCounters which) const
++    {
++        std::vector<nmos::nc::counter> result;
++        NvNmosSide side;
++        std::string name;
++        if (!control_config.get_counters || !find_monitor_target(monitor, side, name)) return result;
++
++        NvNmosMonitorCounter counters[32] = {};
++        const auto count = std::min(control_config.get_counters(c_server, side, name.c_str(), which, counters, 32), size_t(32));
++        for (size_t index = 0; index < count; ++index)
++        {
++            if (!counters[index].name) continue;
++            result.push_back({ utility::s2us(counters[index].name), counters[index].value, utility::s2us(counters[index].description) });
++        }
++        return result;
++    }
++
++    void server::reset_monitor_counters(const nmos::resource& monitor) const
++    {
++        NvNmosSide side;
++        std::string name;
++        if (!control_config.reset_counters || !find_monitor_target(monitor, side, name)) return;
++        control_config.reset_counters(c_server, side, name.c_str());
++    }
++
++    void server::set_monitor_status(const nmos::type& type, const std::string& name, NvNmosMonitorDomain domain, int status, const std::string& message)
++    {
++        try
++        {
++            if (!control_protocol_state) throw std::logic_error("server created without the control protocol");
++
++            auto lock = node_model.write_lock();
++
++            auto& resources = node_model.control_protocol_resources;
++            const auto id = impl::make_id(nmos::experimental::fields::seed_id(node_model.settings), type, utility::s2us(name));
++            const auto monitor = nmos::nc::find_resource(resources, nmos::types::nc_status_monitor, id);
++            if (resources.end() == monitor) throw std::invalid_argument("Could not find the monitor of " + utility::us2s(type.name) + ": " + name);
++
++            const auto oid = nmos::fields::nc::oid(monitor->data);
++            const auto class_id = nmos::nc::details::parse_class_id(nmos::fields::nc::class_id(monitor->data));
++            const bool sender = nmos::nc::is_sender_monitor(class_id);
++            const auto status_property_id = [&]
++            {
++                switch (domain)
++                {
++                case NVNMOS_MONITOR_DOMAIN_LINK: return sender ? nmos::nc_sender_monitor_link_status_property_id : nmos::nc_receiver_monitor_link_status_property_id;
++                case NVNMOS_MONITOR_DOMAIN_CONNECTION: return sender ? nmos::nc_sender_monitor_transmission_status_property_id : nmos::nc_receiver_monitor_connection_status_property_id;
++                case NVNMOS_MONITOR_DOMAIN_SYNCHRONIZATION: return sender ? nmos::nc_sender_monitor_external_synchronization_status_property_id : nmos::nc_receiver_monitor_external_synchronization_status_property_id;
++                case NVNMOS_MONITOR_DOMAIN_STREAM: return sender ? nmos::nc_sender_monitor_essence_status_property_id : nmos::nc_receiver_monitor_stream_status_property_id;
++                }
++                throw std::invalid_argument("invalid NvNmosMonitorDomain");
++            }();
++            const auto domains = nmos::nc::get_monitor_domains(class_id, nmos::make_get_monitor_domains_handler(*control_protocol_state));
++            const auto found = std::find_if(domains.begin(), domains.end(), [&](const nmos::experimental::monitor_domain& d) { return status_property_id == d.status_property_id; });
++            if (domains.end() == found) throw std::invalid_argument("invalid NvNmosMonitorDomain");
++
++            const bool applied = nmos::nc::set_monitor_status(resources, oid, status, utility::s2us(message), *found,
++                nmos::make_monitor_status_pending_handler(*control_protocol_state),
++                nmos::make_get_control_protocol_class_descriptor_handler(*control_protocol_state),
++                nmos::make_get_monitor_domains_handler(*control_protocol_state),
++                gate);
++            if (!applied) throw std::invalid_argument("Could not set the status of the monitor of " + utility::us2s(type.name) + ": " + name);
++
++            node_model.notify();
++        }
++        catch (...)
++        {
++            log_current_exception();
++            throw;
++        }
++    }
++
+     nmos::id server::node_id() const
+     {
+         auto lock = node_model.read_lock();
+@@ -798,7 +1058,27 @@ bool create_nmos_node_server(
+     if (!config || !server) return false;
+     try
+     {
+-        std::unique_ptr<nvnmos::server> impl(new nvnmos::server(*config, server));
++        std::unique_ptr<nvnmos::server> impl(new nvnmos::server(*config, nullptr, server));
++
++        server->impl = impl.release();
++        return true;
++    }
++    catch (...)
++    {
++        return false;
++    }
++}
++
++NVNMOS_API
++bool create_nmos_node_server_with_control_protocol(
++    const NvNmosNodeConfig* config,
++    const NvNmosControlProtocolConfig* control_config,
++    NvNmosNodeServer* server)
++{
++    if (!config || !control_config || !server) return false;
++    try
++    {
++        std::unique_ptr<nvnmos::server> impl(new nvnmos::server(*config, control_config, server));
+ 
+         server->impl = impl.release();
+         return true;
+@@ -973,6 +1253,32 @@ bool nmos_connection_activate(
+     }
+ }
+ 
++NVNMOS_API
++bool nmos_monitor_set_status(
++    NvNmosNodeServer* server,
++    NvNmosSide side,
++    const char* name,
++    NvNmosMonitorDomain domain,
++    int status,
++    const char* message)
++{
++    if (!server) return false;
++    auto impl = (nvnmos::server*)server->impl;
++    if (!impl) return false;
++    if (!name) return false;
++
++    try
++    {
++        const auto type = nvnmos::type_from_side(side);
++        impl->set_monitor_status(type, name, domain, status, message ? message : "");
++        return true;
++    }
++    catch (...)
++    {
++        return false;
++    }
++}
++
+ NVNMOS_API
+ bool nmos_channelmapping_activate(
+     NvNmosNodeServer* server,
+diff --git a/src/nvnmos.h b/src/nvnmos.h
+index 603c34d..f250c86 100644
+--- a/src/nvnmos.h
++++ b/src/nvnmos.h
+@@ -99,6 +99,7 @@
+ 
+ #include <stdbool.h>
+ #include <stddef.h>
++#include <stdint.h>
+ 
+ #ifdef __cplusplus
+ extern "C"
+@@ -562,6 +563,170 @@ NVNMOS_API
+ bool destroy_nmos_node_server(
+     NvNmosNodeServer *server);
+ 
++/**
++ * Defines the status domains of an AMWA BCP-008 monitor that the
++ * application reports. A Receiver's monitor (NcReceiverMonitor,
++ * BCP-008-01) and a Sender's monitor (NcSenderMonitor, BCP-008-02)
++ * each have four; the overall status is derived from them.
++ */
++typedef enum _NvNmosMonitorDomain
++{
++    /** linkStatus of either monitor; status is one of
++        NVNMOS_LINK_STATUS_*. */
++    NVNMOS_MONITOR_DOMAIN_LINK = 1,
++    /** connectionStatus of a Receiver's monitor, transmissionStatus of
++        a Sender's monitor; status is one of NVNMOS_MONITOR_STATUS_*. */
++    NVNMOS_MONITOR_DOMAIN_CONNECTION = 2,
++    /** externalSynchronizationStatus of either monitor; status is one
++        of NVNMOS_SYNCHRONIZATION_STATUS_*. */
++    NVNMOS_MONITOR_DOMAIN_SYNCHRONIZATION = 3,
++    /** streamStatus of a Receiver's monitor, essenceStatus of a
++        Sender's monitor; status is one of NVNMOS_MONITOR_STATUS_*. */
++    NVNMOS_MONITOR_DOMAIN_STREAM = 4
++} NvNmosMonitorDomain;
++
++/**
++ * Defines the values of the BCP-008 connection, transmission, stream
++ * and essence statuses.
++ */
++enum {
++    NVNMOS_MONITOR_STATUS_INACTIVE = 0,
++    NVNMOS_MONITOR_STATUS_HEALTHY = 1,
++    NVNMOS_MONITOR_STATUS_PARTIALLY_HEALTHY = 2,
++    NVNMOS_MONITOR_STATUS_UNHEALTHY = 3
++};
++
++/**
++ * Defines the values of the BCP-008 link status.
++ */
++enum {
++    NVNMOS_LINK_STATUS_ALL_UP = 1,
++    NVNMOS_LINK_STATUS_SOME_DOWN = 2,
++    NVNMOS_LINK_STATUS_ALL_DOWN = 3
++};
++
++/**
++ * Defines the values of the BCP-008 external synchronization status.
++ */
++enum {
++    NVNMOS_SYNCHRONIZATION_STATUS_NOT_USED = 0,
++    NVNMOS_SYNCHRONIZATION_STATUS_HEALTHY = 1,
++    NVNMOS_SYNCHRONIZATION_STATUS_PARTIALLY_HEALTHY = 2,
++    NVNMOS_SYNCHRONIZATION_STATUS_UNHEALTHY = 3
++};
++
++/**
++ * Defines which counters a Controller asks a monitor for.
++ */
++typedef enum _NvNmosMonitorCounters
++{
++    /** GetLostPacketCounters of a Receiver's monitor. */
++    NVNMOS_MONITOR_COUNTERS_LOST = 1,
++    /** GetLatePacketCounters of a Receiver's monitor. */
++    NVNMOS_MONITOR_COUNTERS_LATE = 2,
++    /** GetTransmissionErrorCounters of a Sender's monitor. */
++    NVNMOS_MONITOR_COUNTERS_TRANSMISSION_ERROR = 3
++} NvNmosMonitorCounters;
++
++/**
++ * Holds one counter of a monitor (NcCounter).
++ */
++typedef struct _NvNmosMonitorCounter
++{
++    /** Holds the name of the counter. Must not be null. */
++    const char *name;
++    /** Holds the value of the counter. */
++    uint64_t value;
++    /** Holds the description of the counter. May be null. */
++    const char *description;
++} NvNmosMonitorCounter;
++
++/**
++ * Type for a callback from NvNmos when a Controller asks a monitor for
++ * its counters.
++ *
++ * Invoked on a thread of the IS-12 server, with the Node's model
++ * locked: it must not block and must not call back into NvNmos.
++ *
++ * @param[in] server       The server issuing the callback.
++ * @param[in] side         Whether the monitor is a Sender's or a
++ *                         Receiver's.
++ * @param[in] name         The caller-chosen name of the sender or
++ *                         receiver.
++ * @param[in] which        The counters asked for.
++ * @param[out] counters    Array to fill; the strings it points to must
++ *                         stay valid until the callback returns.
++ * @param[in] max_counters The size of @p counters.
++ * @return The number of counters filled in, at most @p max_counters.
++ */
++typedef size_t (* nmos_monitor_counters_callback)(
++    NvNmosNodeServer *server,
++    NvNmosSide side,
++    const char *name,
++    NvNmosMonitorCounters which,
++    NvNmosMonitorCounter *counters,
++    size_t max_counters);
++
++/**
++ * Type for a callback from NvNmos when a Controller resets a monitor's
++ * counters (ResetCounters), or the monitor resets them itself on
++ * activation with autoResetCounters set.
++ *
++ * Invoked under the same conditions as @ref nmos_monitor_counters_callback.
++ *
++ * @param[in] server The server issuing the callback.
++ * @param[in] side   Whether the monitor is a Sender's or a Receiver's.
++ * @param[in] name   The caller-chosen name of the sender or receiver.
++ */
++typedef void (* nmos_monitor_reset_callback)(
++    NvNmosNodeServer *server,
++    NvNmosSide side,
++    const char *name);
++
++/**
++ * Defines configuration settings for the IS-12 Control Protocol of an
++ * @ref NvNmosNodeServer, used by
++ * @ref create_nmos_node_server_with_control_protocol.
++ * The structure should be zero initialized.
++ *
++ * With it, the Node advertises an IS-12 endpoint on its Device and
++ * holds an AMWA BCP-008 monitor for every sender and receiver, linked
++ * to it by an NMOS touchpoint, in a "sender-monitors" or
++ * "receiver-monitors" block. A monitor is active while its sender or
++ * receiver is, through the IS-05 Connection API or
++ * @ref nmos_connection_activate, and its statuses are reported by the
++ * application with @ref nmos_monitor_set_status.
++ */
++typedef struct _NvNmosControlProtocolConfig
++{
++    /** Holds the port number for the IS-12 websocket, which must differ
++        from the HTTP API port. May be zero in which case the nmos-cpp
++        default (3218) is used. */
++    unsigned int port;
++    /** Holds the callback for a monitor's counters. May be null, in
++        which case every monitor reports no counters. */
++    nmos_monitor_counters_callback get_counters;
++    /** Holds the callback for a reset of a monitor's counters. May be
++        null. */
++    nmos_monitor_reset_callback reset_counters;
++} NvNmosControlProtocolConfig;
++
++/**
++ * Initialize and start an NMOS Node server, as
++ * @ref create_nmos_node_server does, with the IS-12 Control Protocol
++ * and a BCP-008 monitor for every sender and receiver.
++ *
++ * @param[in] config          Pointer to the configuration settings.
++ * @param[in] control_config  Pointer to the Control Protocol settings.
++ * @param[in] server          Pointer to the server to be initialized.
++ * @return Whether the server has been created and successfully started.
++ */
++NVNMOS_API
++bool create_nmos_node_server_with_control_protocol(
++    const NvNmosNodeConfig *config,
++    const NvNmosControlProtocolConfig *control_config,
++    NvNmosNodeServer *server);
++
+ /**
+  * Add an NMOS Receiver to an NMOS Node server according to the
+  * specified configuration settings.
+@@ -665,6 +830,33 @@ bool nmos_connection_activate(
+     const char *name,
+     const char *transport_file);
+ 
++/**
++ * Report one status of the BCP-008 monitor of a sender or receiver.
++ *
++ * The server must have been created with
++ * @ref create_nmos_node_server_with_control_protocol. nmos-cpp reports
++ * a status getting worse at once, and a status getting better, or any
++ * change within the monitor's statusReportingDelay of its activation,
++ * once that delay has passed; it counts the transitions, derives the
++ * overall status and notifies subscribed Controllers.
++ *
++ * @param[in] server  Pointer to the server to be updated.
++ * @param[in] side    Whether the monitor is a Sender's or a Receiver's.
++ * @param[in] name    The caller-chosen name of the sender or receiver.
++ * @param[in] domain  The status domain.
++ * @param[in] status  The status, one of the values @p domain names.
++ * @param[in] message The status message. May be null for none.
++ * @return Whether the status has been successfully applied.
++ */
++NVNMOS_API
++bool nmos_monitor_set_status(
++    NvNmosNodeServer *server,
++    NvNmosSide side,
++    const char *name,
++    NvNmosMonitorDomain domain,
++    int status,
++    const char *message);
++
+ /**
+  * Parent type for an IS-08 Input's /parent endpoint.
+  */
+diff --git a/src/nvnmos_impl.h b/src/nvnmos_impl.h
+index 5871221..9f2adb5 100644
+--- a/src/nvnmos_impl.h
++++ b/src/nvnmos_impl.h
+@@ -46,6 +46,7 @@ namespace nmos
+     typedef utility::string_t channelmapping_id;
+ 
+     struct node_model;
++    struct resource;
+ 
+     namespace experimental
+     {
+@@ -65,6 +66,9 @@ namespace nvnmos
+ 
+         // generate URLs for the Node API and Connection API
+         std::pair<utility::string_t, utility::string_t> make_api_base_urls(const nmos::settings& settings);
++
++        // get the name for the sender or receiver from a resource tag
++        nvnmos::name get_name(const nmos::resource& resource);
+     }
+ 
+     // custom settings fields
