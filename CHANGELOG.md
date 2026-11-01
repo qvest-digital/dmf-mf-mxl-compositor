@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.21](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.20...v1.0.0-rc.21) (2026-11-01)
+
+
+### Features
+
+* **nmos:** add IS-12 with BCP-008 monitors to libnvnmos ([#46](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/46)) ([eb082b2](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/eb082b228c7b825ac9a7d93d0fb1ee513becd013))
+* **nmos:** publish BCP-004-02 caps on libnvnmos MXL senders ([#44](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/44)) ([2f74386](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/2f743865adbe5e92ed03f096cd0f88010dd1e02f))
+
 ## [1.0.0-rc.20](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.19...v1.0.0-rc.20) (2026-10-25)
 
 
