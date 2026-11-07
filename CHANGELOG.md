@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.22](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.21...v1.0.0-rc.22) (2026-11-07)
+
+
+### Bug Fixes
+
+* **nmos:** label the Source and Flow of every libnvnmos sender ([#47](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/47)) ([7dda844](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/7dda8442bb8fa3c250d182e381c7b29b500ef6a8))
+
 ## [1.0.0-rc.21](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.20...v1.0.0-rc.21) (2026-11-01)
 
 
