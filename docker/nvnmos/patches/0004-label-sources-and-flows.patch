@@ -1,0 +1,32 @@
+diff --git a/src/nvnmos_impl.cpp b/src/nvnmos_impl.cpp
+index 0d1ed34..32224bc 100644
+--- a/src/nvnmos_impl.cpp
++++ b/src/nvnmos_impl.cpp
+@@ -419,6 +419,13 @@ namespace nvnmos
+         // override default label and description from model.settings
+         sender.data[nmos::fields::label] = value::string(sdp_params.session_name);
+         sender.data[nmos::fields::description] = value::string(session_info);
++        // the Source and Flow describe what this sender sends, and a controller
++        // listing them shows nothing where they carry the empty default
++        for (auto* resource : { &source, &flow })
++        {
++            resource->data[nmos::fields::label] = sender.data[nmos::fields::label];
++            resource->data[nmos::fields::description] = sender.data[nmos::fields::description];
++        }
+         // set the name as a resource tag
+         impl::set_name(sender, name);
+         // set the group hint as a resource tag
+@@ -761,6 +768,13 @@ namespace nvnmos
+         // json_exception if absent
+         sender.data[nmos::fields::label] = value::string(nmos::fields::label(flow_def));
+         sender.data[nmos::fields::description] = value::string(nmos::fields::description(flow_def));
++        // the Source and Flow describe the flow definition, and a controller
++        // listing them shows nothing where they carry the empty default
++        for (auto* resource : { &source, &flow })
++        {
++            resource->data[nmos::fields::label] = sender.data[nmos::fields::label];
++            resource->data[nmos::fields::description] = sender.data[nmos::fields::description];
++        }
+         impl::set_name(sender, name);
+         if (!group_hint.empty()) impl::set_group_hint(sender, group_hint);
+ 
