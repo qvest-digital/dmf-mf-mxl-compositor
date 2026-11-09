@@ -166,8 +166,9 @@ node agent serving the same domain surfaces as `MXL_ERR_UNKNOWN` from
 Renovate proposes bumps against the inline marker above the `ARG` line;
 accepting one in isolation is not safe.
 
-`vendor/mxl/` carries the MXL headers the sources compile against. `libmxl.so`
-itself comes from the base image at build and run time.
+The MXL headers and `libmxl.so` come from the base image: the builder
+installs them under `/opt/libmxl`, and `-DMXL_INCLUDE_DIR=` points the build
+elsewhere.
 
 ## Releasing
 

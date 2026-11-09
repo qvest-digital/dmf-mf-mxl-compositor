@@ -48,8 +48,8 @@ them. Renovate proposes the bump; accepting it is a cross-repository decision.
 names the libnvnmos image the build workflow publishes when it is missing.
 It is independent of `GO_MXL_TAG`: libnvnmos does not link libmxl.
 
-`vendor/mxl/` holds MXL headers from an external source. Preserve their SPDX
-lines. `libmxl.so` itself comes from the base image.
+The MXL headers and `libmxl.so` come from the base image, under
+`/opt/libmxl`.
 
 ## Voice
 
