@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(PkgConfig REQUIRED)
+
+# The go-mxl builder image installs libmxl, headers included, under /opt/libmxl.
+set(MXL_INCLUDE_DIR "/opt/libmxl/include" CACHE PATH "Directory holding mxl/mxl.h")
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
 
 # libnvnmos provides the NMOS Node (IS-04, IS-05, BCP-007-03). NVNMOS_ROOT is
@@ -25,7 +28,7 @@ target_link_libraries(nmos-support PRIVATE nlohmann_json::nlohmann_json)
 add_executable(mxl-multi-compositor src/main.cpp src/nmos/node.cpp src/nmos/http.cpp src/nmos/configmap.cpp)
 target_compile_options(mxl-multi-compositor PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(mxl-multi-compositor PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/vendor ${CMAKE_CURRENT_SOURCE_DIR}/src ${NVNMOS_INCLUDE_DIR})
+  ${MXL_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src ${NVNMOS_INCLUDE_DIR})
 target_link_libraries(mxl-multi-compositor PRIVATE
   PkgConfig::GST PkgConfig::CURL mxl nmos-support nlohmann_json::nlohmann_json ${NVNMOS_LIBRARY} pthread)
 
