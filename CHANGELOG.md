@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.23](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.22...v1.0.0-rc.23) (2026-11-13)
+
+
+### Dependencies
+
+* **go-mxl:** update go-mxl to v1.1.0-rc.15 ([#50](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/50)) ([92c5b84](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/92c5b84efca941968b8f2b92c8a71f459ba98c32))
+
 ## [1.0.0-rc.22](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.21...v1.0.0-rc.22) (2026-11-09)
 
 
