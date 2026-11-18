@@ -63,6 +63,11 @@ add_executable(grain_rate_test tests/grain_rate_test.cpp)
 target_include_directories(grain_rate_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME grain_rate_test COMMAND grain_rate_test)
 
+add_executable(monitors_test tests/monitors_test.cpp)
+target_include_directories(monitors_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(monitors_test PRIVATE mxl-monitoring)
+add_test(NAME monitors_test COMMAND monitors_test)
+
 add_executable(host_name_test tests/host_name_test.cpp)
 target_include_directories(host_name_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME host_name_test COMMAND host_name_test)

@@ -87,6 +87,26 @@ tile's is not shown, because tiles are composited at their native size without
 scaling; the tile stays black and the reason is logged. A flow of another rate
 is shown at the tile's.
 
+### Monitors
+
+With `NMOS_CONTROL_PORT` set the Node serves the IS-12 Control Protocol there,
+with an AMWA BCP-008-01 `NcReceiverMonitor` per Receiver in a
+`receiver-monitors` block, linked to its Receiver by a touchpoint. Once a
+second each tile showing a flow gives its monitor the statuses its
+`/metrics` counts since the second before decide, as libmxl-monitoring judges
+them: the link from the MXL domain being available, the connection from the
+flow being open and read without stalls, losses, failed or late reads, no
+external synchronization, and the stream from the content read and from a
+flow refused for its format or size. A tile moving to another flow is judged
+once it reads the new one. `GetLostPacketCounters` answers the grains skipped
+and missing, `GetLatePacketCounters` the reads too early past the grace, both
+since the last reset. nmos-cpp applies the reporting delay, counts
+transitions, derives the overall status, and has a monitor inactive while its
+Receiver is.
+
+The port must differ from `NMOS_HTTP_PORT` and `MXL_STATS_PORT`; one that is
+not a port, or is one of those, exits non-zero.
+
 ### Connections across a restart
 
 IS-05 keeps a Receiver's connection in memory. With
@@ -120,6 +140,7 @@ on it; the API server, namespace, token and CA are the ones every pod is given
 | `NMOS_POD_NAMESPACE` | none | Namespace of the pod, which names its DNS record; required with NMOS where `NMOS_HOST_NAME` is unset |
 | `NMOS_SEED` | none, required with NMOS | Seed for resource ids; stable per instance |
 | `NMOS_HTTP_PORT` | library default | Port for the Node and Connection APIs |
+| `NMOS_CONTROL_PORT` | unset, no IS-12 | Port of the IS-12 Control Protocol, with a BCP-008-01 monitor per Receiver |
 | `NMOS_LABEL` | `MXL compositor` | Node and Device label |
 | `NMOS_DESCRIPTION` | `MXL mosaic compositor` | Node and Device description |
 | `NMOS_REGISTRY_HOST` | unset, DNS-SD | Fixed IS-04 Registration API; disables discovery |
@@ -148,7 +169,9 @@ nmos-cpp, pinned by commit in the Dockerfile's `NVNMOS_REF`.
 stands up an nmos-cpp registry, an MXL test pattern writer and the compositor
 as a Node with Docker Compose, checks that `/metrics` counts the reads of a
 tile connected to the written flow and reports idle tiles as disconnected,
-checks that a connection is stored and restored across a restart of the
+checks over IS-12 that the tile's monitor is healthy, an idle tile's inactive
+and one connected to a missing flow unhealthy, checks that a connection is
+stored and restored across a restart of the
 compositor against a stand-in for the Kubernetes API that serves the one
 ConfigMap, and runs the AMWA NMOS Testing Tool's IS-04-01, IS-05-01, IS-05-02
 and BCP-007-03-01 suites against it. A warning is reported but does not fail a

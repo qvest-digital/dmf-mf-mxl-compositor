@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Runs the AMWA NMOS Testing Tool suites that cover what the compositor's Node
 # claims -- IS-04-01, IS-05-01, IS-05-02 and BCP-007-03-01 -- against it and a
-# real nmos-cpp registry, after checking that every tile's reads are counted and
-# that a connection survives a restart.
+# real nmos-cpp registry, after checking that every tile's reads are counted,
+# that each tile's IS-12 monitor reports its health, and that a connection
+# survives a restart.
 # Exits non-zero if any check or suite fails. Needs docker, curl, jq and openssl.
 #
 #   tests/nmos/run.sh              # builds the image, runs every suite
@@ -197,6 +198,19 @@ if [ -z "$tile" ] || [ "$(tiles_in open)" -ne 1 ] || [ "$(tiles_in disconnected)
   metrics_rc=1
 fi
 
+# Each tile's BCP-008-01 monitor reports from those counts over IS-12: the
+# tile reading the written flow is healthy once the reporting delay has
+# passed, an idle tile's monitor is inactive.
+ncp() { docker compose exec -T apiserver python3 /ncp.py "$NODE" 8218 "$@"; }
+idle=tile-0; [ "$tile" != tile-0 ] || idle=tile-1
+monitors_rc=0
+ncp "$tile" status connection 1 20 && ncp "$tile" status stream 1 5 && ncp "$tile" status overall 1 5 \
+  && ncp "$tile" status link 1 1 && ncp "$tile" status synchronization 0 1 \
+  || { echo "FAIL the monitor of a tile reading a written flow is not healthy"; monitors_rc=1; }
+ncp "$idle" status connection 0 1 || { echo "FAIL the monitor of an idle tile is not inactive"; monitors_rc=1; }
+[ "$(ncp "$tile" lost)" = '{"missing": 0, "skipped": 0}' ] || {
+  echo "FAIL lost counters of a tile reading in order: $(ncp "$tile" lost)"; monitors_rc=1; }
+
 patch() {
   in_lane -o /dev/null -w '%{http_code}' -X PATCH -H 'Content-Type: application/json' \
     "$conn/$rx/staged" -d "{\"master_enable\":true,\"activation\":{\"mode\":\"activate_immediate\"},\"transport_params\":[{\"mxl_flow_id\":\"11111111-2222-4333-8444-555555555555\",\"mxl_domain_id\":\"$1\"}]}"
@@ -214,6 +228,9 @@ for _ in $(seq 1 10); do [ "$(tiles_in flow_not_found)" -eq 1 ] && break; sleep 
 [ "$(tiles_in flow_not_found)" -eq 1 ] || { echo "FAIL a tile connected to a missing flow is not counted as not found";
   metrics | grep flow_state | sed 's/^/    /'; metrics_rc=1; }
 [ $metrics_rc -eq 0 ] && echo "PASS metrics"
+ncp "$tile" status connection 3 5 || {
+  echo "FAIL the monitor of a tile connected to a missing flow is not unhealthy"; monitors_rc=1; }
+[ $monitors_rc -eq 0 ] && echo "PASS monitors"
 
 # A connection outlives the process: a controller's activation is stored, and
 # a restarted compositor comes back with the same /active -- the Sender named,
@@ -285,7 +302,7 @@ restart_compositor || { echo "FAIL the compositor did not come back"; restore_rc
 suites=("$@")
 [ ${#suites[@]} -gt 0 ] || suites=(IS-04-01 IS-05-01 IS-05-02 BCP-007-03-01)
 
-rc=$((hrefs_rc | caps_rc | metrics_rc | domains_rc | restore_rc))
+rc=$((hrefs_rc | caps_rc | metrics_rc | monitors_rc | domains_rc | restore_rc))
 for suite in "${suites[@]}"; do
   case "$suite" in
     IS-04-01)      args=(--host "$NODE" --port "$PORT" --version v1.3) ;;

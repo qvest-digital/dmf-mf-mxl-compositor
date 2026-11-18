@@ -927,6 +927,9 @@ int main(int argc, char** argv)
     // compositor shows MXL_FLOW_IDS exactly as it always has. Read and checked
     // before anything else starts: a missing seed is a configuration error,
     // and returning once worker threads run would abort rather than exit.
+    int statsPort = std::atoi(env_or("MXL_STATS_PORT", "9090").c_str());
+    if (statsPort <= 0) statsPort = 9090;
+
     auto const nmosHost = env_or("NMOS_HOST_ADDRESS", "");
     bool const nmosOn = !nmosHost.empty();
     nmos_node::Config nc;
@@ -951,6 +954,20 @@ int main(int argc, char** argv)
         }
         nc.hostName = *hostName;
         nc.httpPort = static_cast<unsigned int>(std::atoi(env_or("NMOS_HTTP_PORT", "0").c_str()));
+        // IS-12 has a websocket port of its own, which nothing else may hold.
+        {
+            auto const text = env_or("NMOS_CONTROL_PORT", "0");
+            char* end = nullptr;
+            long const port = std::strtol(text.c_str(), &end, 10);
+            if (text.empty() || *end != '\0' || port < 0 || port > 65535 ||
+                (port != 0 && (port == statsPort || static_cast<unsigned long>(port) == nc.httpPort)))
+            {
+                g_printerr("NMOS_CONTROL_PORT is not a port apart from NMOS_HTTP_PORT and MXL_STATS_PORT: %s\n",
+                    text.c_str());
+                return 8;
+            }
+            nc.controlPort = static_cast<unsigned int>(port);
+        }
         nc.seed = env_or("NMOS_SEED", "");
         nc.label = env_or("NMOS_LABEL", "MXL compositor");
         nc.description = env_or("NMOS_DESCRIPTION", "MXL mosaic compositor");
@@ -990,6 +1007,7 @@ int main(int argc, char** argv)
         g_printerr("cannot set up monitoring\n");
         return 1;
     }
+    nc.monitoring = monitoring;
     std::vector<FlowWorker> workers(flowIds.size());
     for (std::size_t i = 0; i < flowIds.size(); ++i)
     {
@@ -1121,8 +1139,6 @@ int main(int argc, char** argv)
     }};
 
     // Per-flow delivery metrics endpoint.
-    int statsPort = std::atoi(env_or("MXL_STATS_PORT", "9090").c_str());
-    if (statsPort <= 0) statsPort = 9090;
     std::thread statsHttp{stats_http_server, &workers, monitoring, statsPort};
 
     // Block on bus until ERROR / EOS / SIGTERM.

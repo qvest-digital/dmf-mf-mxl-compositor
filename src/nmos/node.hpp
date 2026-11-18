@@ -5,13 +5,17 @@
 // the tile's slot takes that flow and the reader worker reopens on it.
 // Deactivating a Receiver clears the slot and the tile goes black. With a
 // connections ConfigMap, each tile's connection is kept there and replayed
-// when the Node starts again.
+// when the Node starts again. With a control port, the Node serves IS-12 with
+// an AMWA BCP-008-01 monitor per Receiver, whose statuses and counters come
+// from the tile's counts.
 
 #pragma once
 
 #include <functional>
 #include <memory>
 #include <string>
+
+#include <mxl-monitoring/monitoring.h>
 
 #include "nmos/slots.hpp"
 
@@ -35,6 +39,11 @@ namespace nmos_node
         std::string hostName;
         // Port for the Node and Connection APIs. 0 takes the library default.
         unsigned int httpPort{0};
+        // Port of the IS-12 Control Protocol. 0 serves no IS-12.
+        unsigned int controlPort{0};
+        // Every tile's counts, added in tile order, which the monitors
+        // report from. Required with a control port.
+        ::mxlMonitoring monitoring{nullptr};
         // Seed for stable resource ids across restarts. Two instances
         // sharing a seed publish the same ids, so each needs its own.
         std::string seed;
