@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the AMWA NMOS Testing Tool suites that cover what the compositor's Node
 # claims -- IS-04-01, IS-05-01, IS-05-02 and BCP-007-03-01 -- against it and a
-# real nmos-cpp registry, after checking that a connection survives a restart.
+# real nmos-cpp registry, after checking that every tile's reads are counted and
+# that a connection survives a restart.
 # Exits non-zero if any check or suite fails. Needs docker, curl, jq and openssl.
 #
 #   tests/nmos/run.sh              # builds the image, runs every suite
@@ -12,6 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO_ROOT=$(cd ../.. && pwd)
 export COMPOSITOR_IMAGE="${COMPOSITOR_IMAGE:-compositor-nmos:dev}"
+GO_MXL_TAG=$(sed -n 's/^ARG GO_MXL_TAG=//p' "${REPO_ROOT}/Dockerfile")
+export GO_MXL_TAG
 NODE=172.30.99.20
 NAME=172-30-99-20.lane.pod.cluster.lane
 PORT=8080
@@ -52,7 +55,7 @@ cleanup() {
 }
 trap cleanup EXIT
 docker compose down -v --remove-orphans >/dev/null 2>&1 || true
-docker compose up -d registry rtsp apiserver compositor
+docker compose up -d registry rtsp apiserver writer compositor
 
 # The Node registers once it has read the domain's identity; the suites need
 # it registered, so wait for the registry to list it.
@@ -169,6 +172,31 @@ for rx in $rxs; do
     echo "FAIL $rx constraints do not list both domains: $c"; domains_rc=1; }
 done
 rx=$(head -1 <<<"$rxs")
+
+# Every tile's counts are served as Prometheus text under the tile's name. A
+# tile with nothing connected is disconnected; one connected to a flow that is
+# written reads it and counts its reads; one connected to a flow that is not
+# there counts it as not found.
+WRITER_FLOW=7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
+metrics() { in_lane -s "http://$NODE:9090/metrics"; }
+tiles_in() { metrics | grep -c "^mxl_reader_flow_state{flow=\"tile-[0-9]*\",state=\"$1\"} 1$" || true; }
+metrics_rc=0
+[ "$(tiles_in disconnected)" -eq 4 ] || { echo "FAIL idle tiles are not disconnected"; metrics | grep flow_state | sed 's/^/    /'; metrics_rc=1; }
+code=$(in_lane -o /dev/null -w '%{http_code}' -X PATCH -H 'Content-Type: application/json' "$conn/$rx/staged" \
+  -d "{\"master_enable\":true,\"activation\":{\"mode\":\"activate_immediate\"},\"transport_params\":[{\"mxl_flow_id\":\"$WRITER_FLOW\",\"mxl_domain_id\":\"$PRIMARY_ID\"}]}")
+[ "$code" = 200 ] || { echo "FAIL connect to the written flow: HTTP $code"; metrics_rc=1; }
+for _ in $(seq 1 15); do metrics | grep -q '^mxl_reader_flow_delivering{flow="tile-[0-9]*"} 1$' && break; sleep 1; done
+tile=$(metrics | sed -n 's/^mxl_reader_flow_delivering{flow="\(tile-[0-9]*\)"} 1$/\1/p')
+ok() { metrics | sed -n "s/^mxl_reader_reads_total{flow=\"$tile\",result=\"ok\"} //p"; }
+first=$(ok)
+sleep 2
+if [ -z "$tile" ] || [ "$(tiles_in open)" -ne 1 ] || [ "$(tiles_in disconnected)" -ne 3 ] \
+    || [ "${first:-0}" -le 0 ] || [ "$(ok)" -le "$first" ]; then
+  echo "FAIL a connected tile's reads are not counted"
+  metrics | grep -E 'flow_state|flow_delivering|reads_total.*result="ok"' | sed 's/^/    /'
+  metrics_rc=1
+fi
+
 patch() {
   in_lane -o /dev/null -w '%{http_code}' -X PATCH -H 'Content-Type: application/json' \
     "$conn/$rx/staged" -d "{\"master_enable\":true,\"activation\":{\"mode\":\"activate_immediate\"},\"transport_params\":[{\"mxl_flow_id\":\"11111111-2222-4333-8444-555555555555\",\"mxl_domain_id\":\"$1\"}]}"
@@ -180,6 +208,12 @@ docker compose logs compositor 2>/dev/null | grep -q "in /run/mxl/domains/${SECO
 [ "$(patch 0a000000-0000-4000-8000-000000000001)" = 400 ] || {
   echo "FAIL a domain the compositor does not read was accepted"; domains_rc=1; }
 [ $domains_rc -eq 0 ] && echo "PASS domains"
+
+# The tile connected above now names a flow the second domain does not hold.
+for _ in $(seq 1 10); do [ "$(tiles_in flow_not_found)" -eq 1 ] && break; sleep 1; done
+[ "$(tiles_in flow_not_found)" -eq 1 ] || { echo "FAIL a tile connected to a missing flow is not counted as not found";
+  metrics | grep flow_state | sed 's/^/    /'; metrics_rc=1; }
+[ $metrics_rc -eq 0 ] && echo "PASS metrics"
 
 # A connection outlives the process: a controller's activation is stored, and
 # a restarted compositor comes back with the same /active -- the Sender named,
@@ -251,7 +285,7 @@ restart_compositor || { echo "FAIL the compositor did not come back"; restore_rc
 suites=("$@")
 [ ${#suites[@]} -gt 0 ] || suites=(IS-04-01 IS-05-01 IS-05-02 BCP-007-03-01)
 
-rc=$((hrefs_rc | caps_rc | domains_rc | restore_rc))
+rc=$((hrefs_rc | caps_rc | metrics_rc | domains_rc | restore_rc))
 for suite in "${suites[@]}"; do
   case "$suite" in
     IS-04-01)      args=(--host "$NODE" --port "$PORT" --version v1.3) ;;

@@ -37,8 +37,6 @@ namespace nmos_node
 
     namespace
     {
-        std::string receiver_name(std::size_t i) { return "tile-" + std::to_string(i); }
-
         // flow_def is an MXL flow definition for a tile's Receiver, the form
         // the library takes for an MXL transport file. Its "id" is the flow
         // the tile shows, or a zero UUID where nothing is connected; the
@@ -242,7 +240,7 @@ namespace nmos_node
         node->domains = domains;
         for (std::size_t i = 0; i < slots.size(); ++i)
         {
-            node->names.push_back(receiver_name(i));
+            node->names.push_back(nmos_slots::name(i));
             node->flowDefs.push_back(flow_def(node->names.back(), domainIds, "", cfg));
         }
 

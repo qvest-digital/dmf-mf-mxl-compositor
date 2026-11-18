@@ -23,7 +23,24 @@ ARG NVNMOS_REF=36fb7db9b5616a26f77164de735c15171e01aaed
 ARG NVNMOS_PATCHES=713d795a
 ARG NVNMOS_IMAGE=ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:${NVNMOS_REF}-${NVNMOS_PATCHES}
 
+# libmxl-monitoring counts what every tile reads and renders it for /metrics;
+# built with the compositor and linked statically. Checked out by commit,
+# which a moved tag cannot change; the tag names the release it is.
+# renovate: datasource=github-tags depName=marquies/libmxl-monitoring
+ARG MONITORING_TAG=v0.6.0
+ARG MONITORING_REF=449f446ca2ce341e3a885bce6c204fe071870253
+
 FROM ${NVNMOS_IMAGE} AS nvnmos
+
+# The libmxl-monitoring source, as a stage of its own so a local build can
+# take a checkout instead: --build-context monitoring=<directory>.
+FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS monitoring-clone
+ARG MONITORING_REF
+RUN git clone https://github.com/marquies/libmxl-monitoring.git /libmxl-monitoring \
+ && git -C /libmxl-monitoring checkout "${MONITORING_REF}"
+
+FROM scratch AS monitoring
+COPY --from=monitoring-clone /libmxl-monitoring /
 
 # -- Stage 1: build the compositor binary ------------------------------------
 FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS build
@@ -41,11 +58,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# picojson, which libmxl-monitoring parses flow definitions with, from the
+# image's vcpkg ports in classic mode.
+RUN /root/vcpkg/vcpkg install picojson --x-install-root=/opt/vcpkg
+
 WORKDIR /src
 COPY CMakeLists.txt /src/
 COPY src /src/src/
 COPY tests/domain_test.cpp tests/connections_test.cpp tests/next_grain_test.cpp tests/flow_def_test.cpp tests/grain_rate_test.cpp tests/host_name_test.cpp /src/tests/
 COPY --from=nvnmos /opt/nvnmos /opt/nvnmos
+COPY --from=monitoring / /src/libmxl-monitoring/
 
 # The builder image ships libmxl under /opt/libmxl/lib without a multiarch
 # symlink in /usr/lib/x86_64-linux-gnu, so `-lmxl` does not resolve on its
@@ -55,6 +77,7 @@ RUN ln -s /opt/libmxl/lib/libmxl.so /usr/lib/x86_64-linux-gnu/libmxl.so \
  && ln -s /opt/libmxl/lib/libmxl-fabrics.so /usr/lib/x86_64-linux-gnu/libmxl-fabrics.so
 
 RUN cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release -DNVNMOS_ROOT=/opt/nvnmos \
+        -DCMAKE_PREFIX_PATH="/opt/libmxl;/opt/vcpkg/x64-linux" \
  && cmake --build /src/build --parallel \
  && ctest --test-dir /src/build --output-on-failure \
  && cmake --install /src/build --prefix /opt/mxl-compositor

@@ -58,6 +58,10 @@
 #include <mxl/mxl.h>
 #include <mxl/time.h>
 
+#include <mxl-monitoring/monitoring.h>
+#include <mxl-monitoring/prometheus.h>
+#include <mxl-monitoring/reader.h>
+
 namespace
 {
     std::atomic<bool> g_exit{false};
@@ -122,6 +126,9 @@ namespace
         std::map<std::string, ::mxlInstance> instances;
         ::mxlFlowReader reader{nullptr};
         ::mxlFlowConfigInfo config{};
+        // Counts the tile's opens and reads under its name, whichever flow
+        // it shows, for /metrics.
+        ::mxlMonitoringFlow monitor{nullptr};
         GstElement* appsrc{nullptr};
         std::thread thread;
         std::atomic<std::uint64_t> framesPushed{0};
@@ -167,11 +174,27 @@ namespace
         return out;
     }
 
-    // Minimal single-threaded HTTP/1.0 responder for /stats.json. No deps --
-    // the compositor already links gst/glib but a raw socket keeps the
-    // surface tiny. Serves the live per-flow delivery metrics. CORS-open so a
-    // browser page served from another origin can poll it.
-    void stats_http_server(std::vector<FlowWorker>* workers, int port)
+    // Every tile's counts as Prometheus text.
+    std::string prometheus_text(::mxlMonitoring monitoring)
+    {
+        std::size_t size = 0;
+        ::mxlMonitoringPrometheusRender(monitoring, nullptr, &size);
+        std::string text;
+        // A flow added or a value grown between the two calls needs more.
+        do
+        {
+            text.resize(size);
+        } while (::mxlMonitoringPrometheusRender(monitoring, text.data(), &size) == MXL_ERR_INVALID_ARG && size > text.size());
+        text.resize(size > 0 ? size - 1 : 0);
+        return text;
+    }
+
+    // Minimal single-threaded HTTP/1.0 responder. No deps -- the compositor
+    // already links gst/glib but a raw socket keeps the surface tiny. GET
+    // /metrics answers with every tile's counts as Prometheus text; any other
+    // request with /stats.json, the live per-flow delivery metrics, CORS-open
+    // so a browser page served from another origin can poll it.
+    void stats_http_server(std::vector<FlowWorker>* workers, ::mxlMonitoring monitoring, int port)
     {
         int srv = ::socket(AF_INET, SOCK_STREAM, 0);
         if (srv < 0) { g_printerr("stats: socket() failed\n"); return; }
@@ -193,16 +216,28 @@ namespace
         timeval tv{};
         tv.tv_sec = 1;
         ::setsockopt(srv, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        g_print("stats: serving /stats.json on :%d\n", port);
+        g_print("stats: serving /stats.json and /metrics on :%d\n", port);
 
         while (!g_exit.load(std::memory_order_relaxed))
         {
             int cli = ::accept(srv, nullptr, nullptr);
             if (cli < 0) { if (g_exit.load(std::memory_order_relaxed)) break; continue; }
 
-            // Drain (and ignore) the request line/headers.
+            // Only the request line matters; the headers are drained unread.
             char buf[2048];
-            ::recv(cli, buf, sizeof(buf), 0);
+            auto const got = ::recv(cli, buf, sizeof(buf), 0);
+            std::string const request{buf, got > 0 ? static_cast<std::size_t>(got) : 0};
+            if (request.rfind("GET /metrics ", 0) == 0 || request.rfind("GET /metrics?", 0) == 0)
+            {
+                auto const text = prometheus_text(monitoring);
+                std::string const out = "HTTP/1.0 200 OK\r\n"
+                                        "Content-Type: text/plain; version=0.0.4\r\n"
+                                        "Content-Length: " + std::to_string(text.size()) + "\r\n"
+                                        "Connection: close\r\n\r\n" + text;
+                ::send(cli, out.data(), out.size(), 0);
+                ::close(cli);
+                continue;
+            }
 
             auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::system_clock::now().time_since_epoch())
@@ -368,6 +403,10 @@ namespace
         // tile stays black until something else is connected.
         std::string refused;
         std::uint64_t instanceFailures = 0;
+        // A failed open is tried again a second later, as mxl-reader does, so
+        // what is counted are attempts rather than ticks. The tile is black
+        // meanwhile.
+        auto retryOpen = clock::time_point{};
 
         while (!g_exit.load(std::memory_order_relaxed))
         {
@@ -385,6 +424,9 @@ namespace
                     want.flow.empty() ? "(none)" : want.flow.c_str(), want.domain.c_str(),
                     w->flowId.empty() ? "(none)" : w->flowId.c_str());
                 w->flowId = std::move(want.flow);
+                // An empty flow is a disconnected tile, which is what the
+                // counts then say rather than a failure to reach anything.
+                ::mxlMonitoringSetFlowTarget(w->monitor, w->flowId.c_str());
                 if (want.domain != w->domain)
                 {
                     auto it = w->instances.find(want.domain);
@@ -392,6 +434,7 @@ namespace
                 }
                 w->domain = std::move(want.domain);
                 refused.clear();
+                retryOpen = {};
                 lastHead = 0;
                 stallTicks = 0;
                 lastShownIndex = -1;
@@ -399,14 +442,20 @@ namespace
 
             // The domain's instance, opened on the first flow read from it and
             // kept: libmxl reads a domain's options when it opens one. A
-            // failed open is retried each tick, drawn black meanwhile, as a
-            // flow that is not there yet is.
-            if (!w->flowId.empty() && w->instance == nullptr)
+            // failed open is retried a second later, drawn black meanwhile, as
+            // a flow that is not there yet is. The tile's counts keep the
+            // domain of the instance opened last, to tell a domain that is
+            // gone from a flow that is.
+            if (!w->flowId.empty() && w->instance == nullptr && clock::now() >= retryOpen)
             {
-                w->instance = ::mxlCreateInstance(w->domain.c_str(), "");
+                w->instance = ::mxlMonitoringCreateInstance(w->monitor, w->domain.c_str(), "");
                 if (w->instance != nullptr) w->instances[w->domain] = w->instance;
-                else if (++instanceFailures % 300 == 1)
-                    g_printerr("[%zu] mxlCreateInstance failed for %s\n", w->index, w->domain.c_str());
+                else
+                {
+                    retryOpen = clock::now() + std::chrono::seconds(1);
+                    if (++instanceFailures % 10 == 1)
+                        g_printerr("[%zu] mxlCreateInstance failed for %s\n", w->index, w->domain.c_str());
+                }
             }
 
             if (w->flowId.empty() || w->flowId == refused || w->instance == nullptr)
@@ -422,9 +471,25 @@ namespace
             // place so both stalls and hard tear-downs recover identically.
             if (w->reader == nullptr)
             {
-                bool active = false;
-                if (::mxlIsFlowActive(w->instance, w->flowId.c_str(), &active) == MXL_STATUS_OK && active &&
-                    ::mxlCreateFlowReader(w->instance, w->flowId.c_str(), "", &w->reader) == MXL_STATUS_OK)
+                // A flow nobody writes is not opened: its ring holds whatever
+                // was last written. To the tile's counts it is a flow not
+                // found; one that is not there at all, the open's wrapper
+                // tells apart from a domain gone or a permission refused.
+                bool opened = false;
+                if (clock::now() >= retryOpen)
+                {
+                    bool active = true;
+                    if (::mxlIsFlowActive(w->instance, w->flowId.c_str(), &active) == MXL_STATUS_OK && !active)
+                    {
+                        auto const why = "flow " + w->flowId + " has no writer";
+                        ::mxlMonitoringDescribe(w->monitor, MXL_MONITORING_CONDITION_ACCESS,
+                            MXL_MONITORING_ACCESS_FLOW_NOT_FOUND, MXL_MONITORING_CONTENT_COUNT, why.c_str());
+                        ::mxlMonitoringRecordAccess(w->monitor, MXL_MONITORING_ACCESS_FLOW_NOT_FOUND, MXL_ERR_FLOW_NOT_FOUND);
+                    }
+                    else opened = ::mxlMonitoringCreateFlowReader(w->monitor, w->instance, "", &w->reader) == MXL_STATUS_OK;
+                    if (!opened) retryOpen = clock::now() + std::chrono::seconds(1);
+                }
+                if (opened)
                 {
                     ::mxlFlowReaderGetConfigInfo(w->reader, &w->config);
                     auto const flowRate = w->config.common.grainRate;
@@ -449,6 +514,7 @@ namespace
                             g_printerr("[%zu] %s is %s, not video/v210; not shown\n",
                                 w->index, w->flowId.c_str(),
                                 mediaType.empty() ? "of unknown type" : mediaType.c_str());
+                            ::mxlMonitoringRecordReadContent(w->monitor, MXL_MONITORING_CONTENT_WRONG_FORMAT, 0, 1);
                             ::mxlReleaseFlowReader(w->instance, w->reader);
                             w->reader = nullptr;
                             refused = w->flowId;
@@ -460,6 +526,7 @@ namespace
                         {
                             g_printerr("[%zu] %s is %dx%d, the tile is %dx%d; not shown\n",
                                 w->index, w->flowId.c_str(), fw, fh, vw, vh);
+                            ::mxlMonitoringRecordReadContent(w->monitor, MXL_MONITORING_CONTENT_WRONG_RESOLUTION, 0, 1);
                             ::mxlReleaseFlowReader(w->instance, w->reader);
                             w->reader = nullptr;
                             refused = w->flowId;
@@ -510,20 +577,24 @@ namespace
             // Read the grain after the last one shown, waiting up to a grain
             // period for the writer to commit it (see next_grain.hpp). Only
             // that grain, complete and holding its own index, is taken here;
-            // anything else falls through to the freshest-grain scan.
+            // anything else falls through to the freshest-grain scan. This
+            // read is the tile's counted one: its wrapper records the grain
+            // as read, early, late, missing, invalid or incomplete.
             ::mxlGrainInfo info{};
             std::uint8_t* payload = nullptr;
             bool got = false;
             bool readerDead = false;
+            // Whether the scan found the reader dead, a loss nothing counted.
+            bool deadInScan = false;
             std::int64_t chosenIdx = -1;
             int lastRet = 0;
             ::mxlGrainInfo lastInfo{};
-            if (auto const want = haveIndex
-                    ? next_grain::after(lastShownIndex, static_cast<std::int64_t>(rt.headIndex), lag)
-                    : -1;
-                want >= 0)
+            auto const want = haveIndex
+                ? next_grain::after(lastShownIndex, static_cast<std::int64_t>(rt.headIndex), lag)
+                : -1;
+            if (want >= 0)
             {
-                auto ret = ::mxlFlowReaderGetGrain(w->reader, static_cast<std::uint64_t>(want),
+                auto ret = ::mxlMonitoringFlowReaderGetGrain(w->monitor, w->reader, static_cast<std::uint64_t>(want),
                     static_cast<std::uint64_t>(period.count()), &info, &payload);
                 lastRet = static_cast<int>(ret);
                 if (ret == MXL_ERR_FLOW_INVALID) readerDead = true;
@@ -562,7 +633,7 @@ namespace
                 lastRet = static_cast<int>(ret);
                 if (ret != MXL_STATUS_OK)
                 {
-                    if (ret == MXL_ERR_FLOW_INVALID) { readerDead = true; break; }
+                    if (ret == MXL_ERR_FLOW_INVALID) { readerDead = deadInScan = true; break; }
                     continue;  // aged out / not ready -- try one below
                 }
                 lastInfo = info;
@@ -587,6 +658,8 @@ namespace
                 {
                     // Flow torn down / recreated and the handle is dead. Drop
                     // it; the reopen guard at the loop top re-attaches.
+                    if (deadInScan)
+                        ::mxlMonitoringRecordRead(w->monitor, MXL_ERR_FLOW_INVALID, rt.headIndex, 1);
                     ::mxlReleaseFlowReader(w->instance, w->reader);
                     w->reader = nullptr;
                 }
@@ -605,6 +678,13 @@ namespace
                 pace();
                 continue;
             }
+            // A grain the scan found is read here, unlike one read in order,
+            // which counted itself; what the tile jumped over to reach it is
+            // lost.
+            if (chosenIdx != want)
+                ::mxlMonitoringRecordRead(w->monitor, MXL_STATUS_OK, static_cast<std::uint64_t>(chosenIdx), 1);
+            if (auto const lost = next_grain::skipped(lastShownIndex, want, chosenIdx, lag); lost > 0)
+                ::mxlMonitoringRecordSkipped(w->monitor, static_cast<std::uint64_t>(lost));
             lastShownIndex = chosenIdx;
 
             // Zero-copy would mean handing the payload pointer to gst with a
@@ -904,6 +984,12 @@ int main(int argc, char** argv)
     std::vector<nmos_slots::Source> initial;
     for (auto const& id : flowIds) initial.push_back({id.empty() ? std::string{} : domain, id});
     nmos_slots::Slots slots{initial};
+    ::mxlMonitoring monitoring{nullptr};
+    if (::mxlMonitoringCreate(nullptr, &monitoring) != MXL_STATUS_OK)
+    {
+        g_printerr("cannot set up monitoring\n");
+        return 1;
+    }
     std::vector<FlowWorker> workers(flowIds.size());
     for (std::size_t i = 0; i < flowIds.size(); ++i)
     {
@@ -913,7 +999,16 @@ int main(int argc, char** argv)
         w.slots = &slots;
         w.domain = domain;
 
-        w.instance = ::mxlCreateInstance(domain.c_str(), "");
+        if (::mxlMonitoringAddFlow(monitoring, nmos_slots::name(i).c_str(), MXL_MONITORING_ROLE_READER, &w.monitor) !=
+            MXL_STATUS_OK)
+        {
+            g_printerr("cannot monitor %s\n", nmos_slots::name(i).c_str());
+            return 1;
+        }
+        // Before the worker records; it follows the slot from here.
+        ::mxlMonitoringSetFlowTarget(w.monitor, w.flowId.c_str());
+
+        w.instance = ::mxlMonitoringCreateInstance(w.monitor, domain.c_str(), "");
         if (w.instance == nullptr)
         {
             g_printerr("mxlCreateInstance failed for flow %s\n", w.flowId.c_str());
@@ -937,7 +1032,7 @@ int main(int argc, char** argv)
         // appears.
         for (int attempt = 1; !w.flowId.empty() && !nmosOn; ++attempt)
         {
-            auto ret = ::mxlCreateFlowReader(w.instance, w.flowId.c_str(), "", &w.reader);
+            auto ret = ::mxlMonitoringCreateFlowReader(w.monitor, w.instance, "", &w.reader);
             if (ret == MXL_STATUS_OK) break;
             if (g_exit.load(std::memory_order_relaxed)) return 0;
             if (attempt == 1 || attempt % 15 == 0)
@@ -1028,7 +1123,7 @@ int main(int argc, char** argv)
     // Per-flow delivery metrics endpoint.
     int statsPort = std::atoi(env_or("MXL_STATS_PORT", "9090").c_str());
     if (statsPort <= 0) statsPort = 9090;
-    std::thread statsHttp{stats_http_server, &workers, statsPort};
+    std::thread statsHttp{stats_http_server, &workers, monitoring, statsPort};
 
     // Block on bus until ERROR / EOS / SIGTERM.
     auto* bus = ::gst_element_get_bus(pipeline);
@@ -1093,6 +1188,7 @@ int main(int argc, char** argv)
         for (auto& [path, inst] : w.instances)
             if (inst) ::mxlDestroyInstance(inst);
     }
+    ::mxlMonitoringDestroy(monitoring);
 
     return 0;
 }

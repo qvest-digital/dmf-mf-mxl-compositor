@@ -6,8 +6,11 @@
 # as libmxl requires, holding two domains with only the domain_def.json the
 # platform would write.
 # run.sh creates it; a docker tmpfs volume would not do, because every
-# container mounting one gets a tmpfs of its own. No flow is written into it: the
-# suites test what the Node publishes and how it answers IS-05, and a tile
+# container mounting one gets a tmpfs of its own. writer writes one v210 flow
+# into the primary domain with mxl-gst-testsrc, built by writer.Dockerfile on
+# the go-mxl images the compositor is built on, so a connected tile has
+# something to read and count.
+# The suites test what the Node publishes and how it answers IS-05, and a tile
 # connected to a flow that is not there stays black without failing.
 #
 # The compositor keeps its connections in a ConfigMap. apiserver serves that
@@ -92,6 +95,21 @@ services:
       KUBERNETES_SERVICE_HOST: 172.30.99.40
       KUBERNETES_SERVICE_PORT: "6443"
 
+  writer:
+    image: compositor-lane-writer:${GO_MXL_TAG:?run.sh reads it from the Dockerfile}
+    build:
+      context: .
+      dockerfile: writer.Dockerfile
+      args:
+        GO_MXL_TAG: ${GO_MXL_TAG}
+    network_mode: none
+    volumes:
+      - ${MXL_ROOT}:/run/mxl
+    configs:
+      - source: writer-flow
+        target: /flow.json
+    command: [-d, /run/mxl/domain, -v, /flow.json]
+
   testing:
     image: amwa/nmos-testing:master-9001851
     profiles: [suite]
@@ -116,6 +134,16 @@ services:
       - sh
 
 configs:
+  writer-flow:
+    content: |
+      {"id":"7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","label":"lane","description":"lane test pattern",
+       "tags":{"urn:x-nmos:tag:grouphint/v1.0":["lane-writer:Video"]},
+       "format":"urn:x-nmos:format:video","parents":[],"media_type":"video/v210",
+       "grain_rate":{"numerator":50,"denominator":1},"frame_width":1280,"frame_height":720,
+       "interlace_mode":"progressive","colorspace":"BT709",
+       "components":[{"name":"Y","width":1280,"height":720,"bit_depth":10},
+                     {"name":"Cb","width":640,"height":720,"bit_depth":10},
+                     {"name":"Cr","width":640,"height":720,"bit_depth":10}]}
   registry-container-config:
     content: |
       registry_json=/config/registry.json
