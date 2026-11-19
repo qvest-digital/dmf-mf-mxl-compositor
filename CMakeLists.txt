@@ -17,6 +17,13 @@ set(NVNMOS_ROOT "" CACHE PATH "libnvnmos install prefix")
 find_path(NVNMOS_INCLUDE_DIR nvnmos.h HINTS ${NVNMOS_ROOT}/include REQUIRED)
 find_library(NVNMOS_LIBRARY nvnmos HINTS ${NVNMOS_ROOT}/lib REQUIRED)
 
+# libmxl-monitoring counts each tile's opens and reads and renders them as
+# Prometheus text. MXL_MONITORING_DIR is its source tree, built here and linked
+# statically; it finds libmxl's CMake package and picojson through
+# CMAKE_PREFIX_PATH.
+set(MXL_MONITORING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmxl-monitoring" CACHE PATH "libmxl-monitoring source tree")
+add_subdirectory(${MXL_MONITORING_DIR} libmxl-monitoring EXCLUDE_FROM_ALL)
+
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 find_package(nlohmann_json 3 REQUIRED)
 
@@ -30,7 +37,7 @@ target_compile_options(mxl-multi-compositor PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(mxl-multi-compositor PRIVATE
   ${MXL_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src ${NVNMOS_INCLUDE_DIR})
 target_link_libraries(mxl-multi-compositor PRIVATE
-  PkgConfig::GST PkgConfig::CURL mxl nmos-support nlohmann_json::nlohmann_json ${NVNMOS_LIBRARY} pthread)
+  PkgConfig::GST PkgConfig::CURL mxl mxl-monitoring mxl-monitoring-prometheus nmos-support nlohmann_json::nlohmann_json ${NVNMOS_LIBRARY} pthread)
 
 install(TARGETS mxl-multi-compositor
         RUNTIME DESTINATION bin)

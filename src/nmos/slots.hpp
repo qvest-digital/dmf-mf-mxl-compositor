@@ -15,6 +15,10 @@
 
 namespace nmos_slots
 {
+    // A tile's name: its Receiver's, and what its counts are reported under,
+    // whichever flow it shows.
+    inline std::string name(std::size_t i) { return "tile-" + std::to_string(i); }
+
     struct Source
     {
         // The MXL domain directory the flow is read from.

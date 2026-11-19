@@ -32,13 +32,13 @@ so there is no per-flow decode pass. The encoded bitstream goes to
 | `MXL_FRAME_HEIGHT` | `1080` | Tile height, must match the flow definition |
 | `MXL_GRAIN_RATE` | `50/1` | Rate of every tile, the output and the NMOS caps; `numerator/denominator` or whole |
 | `MXL_GRID_COLS` | derived | Column count override |
-| `MXL_STATS_PORT` | `9090` | Port for the `/stats.json` server |
+| `MXL_STATS_PORT` | `9090` | Port for `/stats.json` and `/metrics` |
 | `MXL_TILES` | flow count | Tile count; tiles beyond `MXL_FLOW_IDS` start empty |
 
 No tiles -- neither `MXL_FLOW_IDS` nor `MXL_TILES` -- exits non-zero, as does
 an `MXL_GRAIN_RATE` that is not two positive integers. Opening a reader retries
-indefinitely rather than exiting, so a flow that is not yet present does not
-turn into a crash loop.
+indefinitely rather than exiting, once a second, so a flow that is not yet
+present does not turn into a crash loop.
 
 Grid geometry is computed once the flow count is known: `cols = ceil(sqrt(n))`,
 `rows = ceil(n / cols)`. The output canvas is `cols * MXL_FRAME_WIDTH` by
@@ -47,6 +47,18 @@ Grid geometry is computed once the flow count is known: `cols = ceil(sqrt(n))`,
 `GET /stats.json` on `MXL_STATS_PORT` returns per-flow `fps`, `pushed`,
 `missed`, `mbps` and `live`, plus `cols`, `rows`, `outW`, `outH` and
 `grainBytes`. It is CORS-open.
+
+`GET /metrics` on the same port returns every tile's counts as Prometheus
+text, from [libmxl-monitoring](https://github.com/marquies/libmxl-monitoring):
+`mxl_reader_*` series labelled `flow="tile-0"`, `flow="tile-1"` and so on,
+whichever flow the tile shows. They hold whether the tile's domain and flow
+could be reached, and the outcome of the grain each tick reads in order:
+read, too early, too late, missing, invalid or incomplete. Grains a tile jumps
+over to catch up with its flow count as skipped, unless the flow is faster
+than `MXL_GRAIN_RATE` and sampled by design. A flow with no writer counts as
+not found. A flow the tile refuses counts as wrong format, or as wrong
+resolution where only its frame size differs. A tile with nothing connected
+is in state `disconnected`.
 
 ## NMOS
 
@@ -133,7 +145,9 @@ nmos-cpp, pinned by commit in the Dockerfile's `NVNMOS_REF`.
 
     tests/nmos/run.sh
 
-stands up an nmos-cpp registry and the compositor as a Node with Docker Compose,
+stands up an nmos-cpp registry, an MXL test pattern writer and the compositor
+as a Node with Docker Compose, checks that `/metrics` counts the reads of a
+tile connected to the written flow and reports idle tiles as disconnected,
 checks that a connection is stored and restored across a restart of the
 compositor against a stand-in for the Kubernetes API that serves the one
 ConfigMap, and runs the AMWA NMOS Testing Tool's IS-04-01, IS-05-01, IS-05-02

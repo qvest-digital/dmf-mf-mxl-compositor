@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 
@@ -38,6 +39,19 @@ namespace next_grain
     {
         if (flowN <= 0 || flowD <= 0) return maxLag;
         return flowN * tickD > tickN * flowD ? 0 : maxLag;
+    }
+
+    // How many grains a tile jumped over to show shown after lastShown: lost
+    // to it, as far as its flow's health goes. attempted is the grain read
+    // in order before falling back to the freshest, which counted itself, or
+    // -1. None for the first grain after an open, and none for a flow sampled
+    // because it is faster than the tile (maxLag 0), whose grains drop by
+    // design.
+    inline std::int64_t skipped(std::int64_t lastShown, std::int64_t attempted, std::int64_t shown, std::int64_t maxLag)
+    {
+        if (lastShown < 0 || maxLag == 0) return 0;
+        std::int64_t const from = std::max(lastShown, attempted);
+        return shown > from + 1 ? shown - from - 1 : 0;
     }
 
     // The time between two grains at numerator/denominator grains per second.

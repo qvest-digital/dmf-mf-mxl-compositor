@@ -94,6 +94,17 @@ int main()
     check(maxStep(sampled) <= 2, "a faster flow drops grains one at a time");
     check(maxStep(inOrder) > 2, "read in order, a faster flow jumps");
 
+    // What a tile reports lost. A grain shown in order loses nothing; a jump
+    // to the head loses the grains between, less the one read in order and
+    // counted by its own read. A sampled flow and the first grain after an
+    // open lose nothing, since nothing was owed.
+    check(next_grain::skipped(10, 11, 11, 2) == 0, "in order: nothing lost");
+    check(next_grain::skipped(10, -1, 20, 2) == 9, "caught up from far behind: the grains between are lost");
+    check(next_grain::skipped(10, 11, 20, 2) == 8, "the grain read in order is not counted twice");
+    check(next_grain::skipped(10, -1, 12, 0) == 0, "a sampled flow drops grains by design");
+    check(next_grain::skipped(-1, -1, 500, 2) == 0, "the first grain after an open");
+    check(next_grain::skipped(500, -1, 3, 2) == 0, "a restarted flow loses nothing");
+
     if (failures == 0) std::puts("next_grain_test: ok");
     return failures == 0 ? 0 : 1;
 }
