@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.24](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.23...v1.0.0-rc.24) (2026-11-19)
+
+
+### Features
+
+* count every tile's reads and serve them on /metrics ([#52](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/52)) ([bdb080b](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/bdb080ba641a67626aec5796465d9feec5d14a41))
+* **nmos:** serve IS-12 with a BCP-008-01 monitor per tile ([#53](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/53)) ([2b753b2](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/2b753b2d3525a6607fde352afc2e9d643c27dd10))
+
 ## [1.0.0-rc.23](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.22...v1.0.0-rc.23) (2026-11-13)
 
 
