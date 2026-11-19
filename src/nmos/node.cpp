@@ -1,6 +1,7 @@
 #include "nmos/node.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -9,6 +10,7 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <glib.h>
@@ -18,6 +20,7 @@
 #include "nmos/connections.hpp"
 #include "nmos/domain.hpp"
 #include "nmos/http.hpp"
+#include "nmos/monitors.hpp"
 #include "nmos/persist.hpp"
 
 namespace nmos_node
@@ -33,6 +36,11 @@ namespace nmos_node
         // The Connection API this process serves, as reached from inside it.
         std::string receiversUrl;
         std::unique_ptr<nmos_persist::Persister> persister;
+        // One per tile, with IS-12 only.
+        std::unique_ptr<nmos_monitors::Tile[]> monitors;
+        ::mxlMonitoring monitoring{nullptr};
+        std::thread poller;
+        std::atomic<bool> stopping{false};
     };
 
     namespace
@@ -120,6 +128,83 @@ namespace nmos_node
             }
             g_printerr("nmos: activation for unknown receiver %s\n", name);
             return false;
+        }
+
+        // The tile a monitor callback names, or none.
+        nmos_monitors::Tile* tile_named(NvNmosNodeServer* server, NvNmosSide side, char const* name)
+        {
+            auto* node = static_cast<Node*>(server->user_data);
+            if (side != NVNMOS_SIDE_RECEIVER || name == nullptr || !node->monitors) return nullptr;
+            auto const it = std::find(node->names.begin(), node->names.end(), name);
+            return it == node->names.end() ? nullptr : &node->monitors[static_cast<std::size_t>(it - node->names.begin())];
+        }
+
+        // libnvnmos calls these on an IS-12 thread holding its model lock, so
+        // they answer from what the last poll left and never call into it.
+        std::size_t on_counters(NvNmosNodeServer* server, NvNmosSide side, char const* name, NvNmosMonitorCounters which,
+            NvNmosMonitorCounter* out, std::size_t max)
+        {
+            auto* tile = tile_named(server, side, name);
+            if (tile == nullptr || (which != NVNMOS_MONITOR_COUNTERS_LOST && which != NVNMOS_MONITOR_COUNTERS_LATE)) return 0;
+            std::vector<mxlMonitoringBcp008Counter> values;
+            {
+                std::lock_guard<std::mutex> lock{tile->mu};
+                if (tile->latest)
+                    values = nmos_monitors::counters(tile->baseline, *tile->latest,
+                        which == NVNMOS_MONITOR_COUNTERS_LOST ? MXL_MONITORING_BCP008_LOST : MXL_MONITORING_BCP008_LATE);
+            }
+            auto const n = std::min(values.size(), max);
+            // The library's names and descriptions are static.
+            for (std::size_t i = 0; i < n; ++i) out[i] = {values[i].name, values[i].value, values[i].description};
+            return n;
+        }
+
+        // A Controller's ResetCounters, or nmos-cpp's own on an activation
+        // with autoResetCounters: counting starts again from the last poll.
+        void on_reset(NvNmosNodeServer* server, NvNmosSide side, char const* name)
+        {
+            if (auto* tile = tile_named(server, side, name))
+            {
+                std::lock_guard<std::mutex> lock{tile->mu};
+                tile->baseline = tile->latest;
+            }
+        }
+
+        // Once a second, gives each tile's monitor the statuses its counts
+        // since the poll before decide, and keeps the counts for the
+        // counters callback. nmos-cpp applies the reporting delay, counts
+        // transitions and derives the overall status.
+        void poll_monitors(Node& node)
+        {
+            constexpr NvNmosMonitorDomain domains[] = {NVNMOS_MONITOR_DOMAIN_LINK, NVNMOS_MONITOR_DOMAIN_CONNECTION,
+                NVNMOS_MONITOR_DOMAIN_SYNCHRONIZATION, NVNMOS_MONITOR_DOMAIN_STREAM};
+            while (!node.stopping.load(std::memory_order_relaxed))
+            {
+                auto const due = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                auto const counts = nmos_monitors::snapshots(node.monitoring);
+                for (std::size_t i = 0; i < node.names.size() && i < counts.size(); ++i)
+                {
+                    auto& tile = node.monitors[i];
+                    auto const& current = counts[i];
+                    std::optional<mxlMonitoringFlowSnapshot> previous;
+                    {
+                        std::lock_guard<std::mutex> lock{tile.mu};
+                        previous = std::exchange(tile.latest, current);
+                    }
+                    if (!nmos_monitors::judged(current, node.slots->get(i).flow)) continue;
+                    auto const statuses = nmos_monitors::judge(previous, current);
+                    for (std::size_t d = 0; d < statuses.size(); ++d)
+                    {
+                        auto const& s = statuses[d];
+                        if (s.status != MXL_MONITORING_BCP008_UNCHANGED &&
+                            !nmos_monitor_set_status(&node.server, NVNMOS_SIDE_RECEIVER, node.names[i].c_str(), domains[d],
+                                s.status, s.message[0] != '\0' ? s.message : nullptr))
+                            g_printerr("nmos: could not report a status of the monitor of %s\n", node.names[i].c_str());
+                    }
+                }
+                while (!node.stopping.load(std::memory_order_relaxed) && std::chrono::steady_clock::now() < due)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
         }
 
         std::string receiver_id(Node const& node, std::size_t i)
@@ -214,6 +299,8 @@ namespace nmos_node
     {
         // Written out while the Connection API can still be read.
         if (node->persister) node->persister->stop();
+        node->stopping.store(true, std::memory_order_relaxed);
+        if (node->poller.joinable()) node->poller.join();
         destroy_nmos_node_server(&node->server);
         delete node;
     }
@@ -302,12 +389,24 @@ namespace nmos_node
         nc.log_level = NVNMOS_LOG_WARNING;
         nc.network_services = &services;
 
+        NvNmosControlProtocolConfig control{};
+        control.port = cfg.controlPort;
+        control.get_counters = &on_counters;
+        control.reset_counters = &on_reset;
+        if (cfg.controlPort != 0)
+        {
+            node->monitors = std::make_unique<nmos_monitors::Tile[]>(slots.size());
+            node->monitoring = cfg.monitoring;
+        }
+
         node->server.user_data = node.get();
-        if (!create_nmos_node_server(&nc, &node->server))
+        if (!(cfg.controlPort != 0 ? create_nmos_node_server_with_control_protocol(&nc, &control, &node->server)
+                                   : create_nmos_node_server(&nc, &node->server)))
         {
             error = "the NMOS Node server did not start";
             return nullptr;
         }
+        if (node->monitors) node->poller = std::thread{poll_monitors, std::ref(*node)};
         if (node->persister) node->persister->start();
 
         // A stored connection is the last one a controller made, so it takes
@@ -342,8 +441,9 @@ namespace nmos_node
 
         std::string listed;
         for (auto const& d : domains) listed += (listed.empty() ? "" : ", ") + d.id + " (" + d.path + ")";
-        g_print("nmos: node up at %s:%u, %zu receivers in domains %s\n",
-            cfg.hostAddress.c_str(), cfg.httpPort, slots.size(), listed.c_str());
+        g_print("nmos: node up at %s:%u, %zu receivers in domains %s%s\n",
+            cfg.hostAddress.c_str(), cfg.httpPort, slots.size(), listed.c_str(),
+            cfg.controlPort != 0 ? (", IS-12 at :" + std::to_string(cfg.controlPort)).c_str() : "");
         return node;
     }
 
