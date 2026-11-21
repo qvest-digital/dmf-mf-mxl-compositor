@@ -10,18 +10,21 @@
 # tag the gateway and node agent serving the same domain were built from.
 # Moving it here alone breaks reads against them.
 # renovate: datasource=docker depName=ghcr.io/qvest-digital/go-mxl-builder
-ARG GO_MXL_TAG=1.1.0-rc.15
+ARG GO_MXL_TAG=1.1.0-rc.18
 
 # NvNmos, NVIDIA's C API over nmos-cpp, provides the NMOS Node: IS-04
 # registration, the IS-05 Connection API and BCP-007-03's MXL transport. It is
 # built by docker/nvnmos/Dockerfile into its own image, tagged by the NvNmos
 # commit and the patches applied to it, because its dependencies take the
-# better part of an hour to compile. The build workflow publishes that image
-# when the tag is missing, and refuses a NVNMOS_PATCHES that is not the first
-# 8 hex digits of sha256sum docker/nvnmos/patches/*.patch | sha256sum.
+# better part of an hour to compile. NVNMOS_BUILD hashes every file under
+# docker/nvnmos/, so a change to the patches, the Dockerfile or the SBOM script
+# there names a new image. The build workflow publishes that image when the
+# tag is missing, and refuses a NVNMOS_BUILD that is not the first 8 hex
+# digits of
+#   find docker/nvnmos -type f | LC_ALL=C sort | xargs sha256sum | sha256sum
 ARG NVNMOS_REF=36fb7db9b5616a26f77164de735c15171e01aaed
-ARG NVNMOS_PATCHES=713d795a
-ARG NVNMOS_IMAGE=ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:${NVNMOS_REF}-${NVNMOS_PATCHES}
+ARG NVNMOS_BUILD=da92b698
+ARG NVNMOS_IMAGE=ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:${NVNMOS_REF}-${NVNMOS_BUILD}
 
 # libmxl-monitoring counts what every tile reads and renders it for /metrics;
 # built with the compositor and linked statically. Checked out by commit,
@@ -69,6 +72,15 @@ COPY tests/domain_test.cpp tests/connections_test.cpp tests/next_grain_test.cpp 
 COPY --from=nvnmos /opt/nvnmos /opt/nvnmos
 COPY --from=monitoring / /src/libmxl-monitoring/
 
+# libmxl-monitoring and picojson are built into the binary, so no package
+# manager on the image knows them; the record travels in the image for the
+# image SBOM. A local checkout taken as the monitoring context is recorded at
+# its HEAD.
+COPY docker/nvnmos/sbom.sh /tmp/sbom.sh
+RUN sh /tmp/sbom.sh git /opt/mxl-compositor/share/sbom/mxl-compositor.cdx.json \
+        libmxl-monitoring /src/libmxl-monitoring \
+ && sh /tmp/sbom.sh vcpkg /opt/mxl-compositor/share/sbom/mxl-compositor.cdx.json /opt/vcpkg
+
 # The builder image ships libmxl under /opt/libmxl/lib without a multiarch
 # symlink in /usr/lib/x86_64-linux-gnu, so `-lmxl` does not resolve on its
 # own. Whether the symlink is present varies by base tag; creating it here
@@ -101,6 +113,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /opt/mxl-compositor/bin/mxl-multi-compositor /usr/bin/
 COPY --from=nvnmos /opt/nvnmos/lib/libnvnmos.so /usr/lib/x86_64-linux-gnu/
+COPY --from=nvnmos /opt/nvnmos/share/sbom/ /opt/nvnmos/share/sbom/
+COPY --from=build /opt/mxl-compositor/share/sbom/ /opt/mxl-compositor/share/sbom/
 
 WORKDIR /home/mxl
 ENTRYPOINT ["/usr/bin/mxl-multi-compositor"]

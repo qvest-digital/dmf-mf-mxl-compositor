@@ -182,15 +182,15 @@ suite. It needs `/dev/shm` for the MXL domain, and curl, jq and openssl.
     docker build -t dmf-mf-mxl-compositor .
 
 `ARG GO_MXL_TAG` selects the `go-mxl-builder` and `go-mxl-runtime` base images.
-`ARG NVNMOS_REF` and `ARG NVNMOS_PATCHES` select the libnvnmos image, built
-from `docker/nvnmos/Dockerfile`:
+`ARG NVNMOS_REF` and `ARG NVNMOS_BUILD`, a hash over `docker/nvnmos/`, select
+the libnvnmos image, built from `docker/nvnmos/Dockerfile`:
 
     docker build -f docker/nvnmos/Dockerfile --build-arg NVNMOS_REF=<ref> \
-        -t ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:<ref>-<patches> docker/nvnmos
+        -t ghcr.io/qvest-digital/dmf-mf-mxl-compositor/nvnmos:<ref>-<build> docker/nvnmos
 
 Its dependencies are compiled from source and take the better part of an hour,
 so the build workflow publishes it only when the pinned tag is missing, and the
-compositor image copies the one library out of it.
+compositor image copies the library and its SBOM fragment out of it.
 
 ### go-mxl lock-step
 
