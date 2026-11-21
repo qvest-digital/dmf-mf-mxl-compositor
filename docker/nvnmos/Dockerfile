@@ -6,7 +6,10 @@
 # its own image, tagged by NVNMOS_REF, and only rebuilt when that changes.
 #
 # The dependencies are linked statically into libnvnmos.so, which then needs
-# nothing beyond libc and libstdc++, so the image carries that one file.
+# nothing beyond libc and libstdc++, so the image carries that one file and,
+# under share/sbom/, the CycloneDX record of what went into it: NvNmos with
+# its patches and every package of the conan graph. No package manager on a
+# consuming image knows them, so an image SBOM lists them only from there.
 #
 # Debian trixie, the release the go-mxl runtime image is based on, so the
 # library resolves against the same libc and libstdc++ it runs with.
@@ -22,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         cmake \
         git \
+        jq \
         python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     && pip install conan~=2.2 \
@@ -45,8 +49,10 @@ RUN conan install src \
         --build=missing \
         --output-folder=src/conan \
         --lockfile=src/conan.lock \
-        -o '*:shared=False'
+        -o '*:shared=False' \
+        --format=json > /tmp/conan-graph.json
 COPY patches /patches
+COPY sbom.sh /tmp/sbom.sh
 RUN for p in /patches/*.patch; do git apply --verbose "$p"; done \
  && cmake -B build \
         -DCMAKE_TOOLCHAIN_FILE=conan/conan_toolchain.cmake \
@@ -56,7 +62,9 @@ RUN for p in /patches/*.patch; do git apply --verbose "$p"; done \
         src \
  && cmake --build build --parallel \
  && cmake --install build --prefix /opt/nvnmos \
- && cp LICENSE /opt/nvnmos/LICENSE
+ && cp LICENSE /opt/nvnmos/LICENSE \
+ && sh /tmp/sbom.sh git /opt/nvnmos/share/sbom/nvnmos.cdx.json nvnmos /nvnmos /patches/*.patch \
+ && sh /tmp/sbom.sh conan /opt/nvnmos/share/sbom/nvnmos.cdx.json /tmp/conan-graph.json
 
 FROM scratch
 COPY --from=build /opt/nvnmos /opt/nvnmos
