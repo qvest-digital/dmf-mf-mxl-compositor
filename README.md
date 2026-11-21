@@ -195,13 +195,15 @@ compositor image copies the library and its SBOM fragment out of it.
 ### go-mxl lock-step
 
 MXL's domain protocol requires every reader and writer sharing a domain to load
-a byte-identical `libmxl.so`. A mismatch between this image and the gateway or
-node agent serving the same domain surfaces as `MXL_ERR_UNKNOWN` from
-`mxlCreateFlowReader`, or as grains that are present but read as garbage.
+a byte-identical `libmxl.so`. A mismatch with any other process on the same
+domain surfaces as `MXL_ERR_UNKNOWN` from `mxlCreateFlowReader`, or as grains
+that are present but read as garbage.
 
-`GO_MXL_TAG` must therefore match the tag those components were built from.
-Renovate proposes bumps against the inline marker above the `ARG` line;
-accepting one in isolation is not safe.
+A `GO_MXL_TAG` bump that changes the `libmxl.so` of the base image is therefore
+safe only together with the same change in every other image reading or writing
+that domain. go-mxl releases do not always change the library, so Renovate's
+bumps against the inline marker above the `ARG` line are checked by comparing
+`/opt/libmxl/lib/libmxl.so*` of the old and new runtime image.
 
 The MXL headers and `libmxl.so` come from the base image: the builder
 installs them under `/opt/libmxl`, and `-DMXL_INCLUDE_DIR=` points the build

@@ -6,9 +6,10 @@
 # GO_MXL_TAG pins both the build and the runtime base. MXL's domain protocol
 # requires every reader and writer sharing a domain to load a byte-identical
 # libmxl.so; a mismatch surfaces as MXL_ERR_UNKNOWN from mxlCreateFlowReader,
-# or as grains that are present but read as garbage. Keep this equal to the
-# tag the gateway and node agent serving the same domain were built from.
-# Moving it here alone breaks reads against them.
+# or as grains that are present but read as garbage. A bump that changes
+# /opt/libmxl/lib/libmxl.so* breaks every other process on the same domain
+# until it loads the same library; compare the library of the old and new
+# runtime image before accepting one.
 # renovate: datasource=docker depName=ghcr.io/qvest-digital/go-mxl-builder
 ARG GO_MXL_TAG=1.1.0-rc.18
 
