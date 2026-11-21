@@ -184,6 +184,12 @@ jobs:
       # components of a fragment it finds in the image, and go-mxl and this
       # image both record picojson, so components are kept once per bom-ref:
       # a CycloneDX document with a repeated bom-ref is invalid.
+      #
+      # Trivy matches advisories by package type. Components identified by
+      # pkg:github or by no purl at all (NvNmos, libmxl, libfabric,
+      # rdma-core, libmxl-monitoring, the vcpkg ports) are listed in the
+      # SBOM but matched against nothing, so neither report.json nor the
+      # gate covers them.
       - name: Generate SBOM and vulnerability report
         env:
           REF: ${{ env.IMAGE }}:${{ steps.tags.outputs.sha }}
