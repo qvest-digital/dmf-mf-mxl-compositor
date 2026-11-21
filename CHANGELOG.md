@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.25](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.24...v1.0.0-rc.25) (2026-11-21)
+
+
+### Dependencies
+
+* **go-mxl:** update go-mxl to v1.1.0-rc.18 ([6984ff1](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/6984ff18a84d5b35e23acdd80b86ce2d2f57a6ab))
+
+
+### Build System
+
+* publish an SBOM of the image and gate on fixable CVEs ([6984ff1](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/6984ff18a84d5b35e23acdd80b86ce2d2f57a6ab))
+
 ## [1.0.0-rc.24](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.23...v1.0.0-rc.24) (2026-11-19)
 
 
