@@ -40,9 +40,11 @@ remote happens in the worktree.
 `ARG GO_MXL_TAG` selects both base images. MXL's
 domain protocol requires every reader and writer sharing a domain to load a
 byte-identical `libmxl.so`; a mismatch surfaces as `MXL_ERR_UNKNOWN` from
-`mxlCreateFlowReader`, or as grains that read as garbage. Bumping it here
-without bumping the gateway and node agent reading the same domain breaks
-them. Renovate proposes the bump; accepting it is a cross-repository decision.
+`mxlCreateFlowReader`, or as grains that read as garbage. A bump that
+changes `/opt/libmxl/lib/libmxl.so*` of the runtime image breaks every other
+process on the same domain until it loads the same library; one that leaves
+the library byte-identical is local to this image. Renovate proposes the bump;
+compare the library of the old and new runtime image before accepting it.
 
 `ARG NVNMOS_REF` pins the NvNmos commit the NMOS Node is built from, and
 names the libnvnmos image the build workflow publishes when it is missing.
