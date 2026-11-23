@@ -102,7 +102,11 @@ USER 0:0
 ENV DEBIAN_FRONTEND=noninteractive
 # Pipeline plugins: compositor (good), x264enc (ugly), mpegtsmux (bad),
 # rtspclientsink (bad / rs-rtsp). libav for hardened muxer support.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Upgraded first, so the packages of the runtime image are as current as the
+# ones installed here, krb5 among them through libcurl. The build cache keeps
+# this layer as it was first built, so Debian's fixes arrive whenever the
+# layer is rebuilt, not on every build.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-base \
         gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad \
