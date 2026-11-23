@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.26](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.25...v1.0.0-rc.26) (2026-11-23)
+
+
+### Bug Fixes
+
+* upgrade the runtime packages with the pipeline plugins ([#59](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/59)) ([e013d88](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/e013d8884db90083051f30db67056a1f61b7600e))
+
+
+### Continuous Integration
+
+* keep the fragment's fields when merging the SBOM ([#58](https://github.com/qvest-digital/dmf-mf-mxl-compositor/issues/58)) ([c32dec2](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/c32dec28468778d194ee41c797740d4b8b0ca93e))
+
 ## [1.0.0-rc.25](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.24...v1.0.0-rc.25) (2026-11-21)
 
 
