@@ -21,7 +21,11 @@ element lays the raw frames out at their native tile size and hands the
 composed frame, scaled once where `MXL_OUTPUT_WIDTH` and `MXL_OUTPUT_HEIGHT`
 name a size, to a single x264 encoder at `MXL_GRAIN_RATE`, with a 2 s GOP,
 so there is no per-flow decode pass. The encoded bitstream goes to
-`rtspclientsink`.
+`rtspclientsink`. An RTSP server that is not up yet, or one that goes away
+under a running mosaic, fails the output and nothing else: the pipeline is
+stopped and played again after 1 s, doubling to at most 30 s while it keeps
+failing and back to 1 s once the output ran for a minute, while the readers
+keep reading. Any other pipeline error exits.
 
 | Variable | Default | Meaning |
 |---|---|---|

@@ -48,6 +48,7 @@
 #include "flow_def.hpp"
 #include "grain_rate.hpp"
 #include "next_grain.hpp"
+#include "output_retry.hpp"
 #include "output_size.hpp"
 #include "nmos/host_name.hpp"
 #include "nmos/node.hpp"
@@ -898,7 +899,8 @@ int main(int argc, char** argv)
         //    faster, which doubles with the rate. ultrafast would drop CABAC
         //    and deblocking.
         //  - bitrate: 6000 kbps at the 720p baseline, scaled linearly
-        //    with canvas area (bitrateKbps above).
+        //    with the encoded area and capped by COMPOSITOR_MAX_BITRATE_KBPS
+        //    (bitrateKbps above).
         //  - bframes=0: WebRTC cannot carry them. mediamtx accepts the
         //    stream, opens the peer connection, then closes it with
         //    "WebRTC doesn't support H264 streams with B-frames" and the
@@ -921,8 +923,8 @@ int main(int argc, char** argv)
         // Drop-old leaky queue right before the RTSP sink: if mediamtx
         // momentarily stalls accepting RTP, throw frames away rather
         // than queue them indefinitely.
-        "! queue leaky=downstream max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
-        "! rtspclientsink protocols=tcp location=\"" + outUrl + "\" ";
+        // The rtspclientsink after it is added for each try; see play below.
+        "! queue name=outq leaky=downstream max-size-buffers=8 max-size-bytes=0 max-size-time=0 ";
 
     for (std::size_t i = 0; i < flowIds.size(); ++i)
     {
@@ -1103,11 +1105,50 @@ int main(int argc, char** argv)
         }
     }
 
-    if (::gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
-    {
-        g_printerr("Failed to set pipeline PLAYING\n");
-        return 7;
-    }
+    // The RTSP server may not be up yet, or restart under a running mosaic.
+    // Either fails the output, and the whole pipeline is stopped and played
+    // again after a growing wait; the readers keep reading meanwhile, their
+    // pushes refused as flushing. Any other error ends the process. Each try
+    // gets a new rtspclientsink: one that lost its server mid-stream opens a
+    // session on the next and never publishes into it.
+    auto* const outq = ::gst_bin_get_by_name(GST_BIN(pipeline), "outq");
+    auto* bus = ::gst_element_get_bus(pipeline);
+    GstElement* out = nullptr;
+    output_retry::Backoff backoff{std::chrono::seconds(1), std::chrono::seconds(30), std::chrono::seconds(60)};
+    using steady = std::chrono::steady_clock;
+    auto playingSince = steady::now();
+    auto retryAt = steady::time_point::max();
+    auto failOutput = [&](char const* why) {
+        ::gst_element_set_state(pipeline, GST_STATE_NULL);
+        if (out != nullptr) ::gst_bin_remove(GST_BIN(pipeline), out);
+        out = nullptr;
+        // What the stopped output posted is not news, and names an element
+        // that is gone.
+        ::gst_bus_set_flushing(bus, TRUE);
+        ::gst_bus_set_flushing(bus, FALSE);
+        auto const wait = backoff.next(std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - playingSince));
+        g_printerr("output %s failed: %s; trying again in %lld ms\n", outUrl.c_str(), why,
+            static_cast<long long>(wait.count()));
+        retryAt = steady::now() + wait;
+    };
+    auto play = [&]() {
+        retryAt = steady::time_point::max();
+        playingSince = steady::now();
+        out = ::gst_element_factory_make("rtspclientsink", "out");
+        if (out == nullptr || outq == nullptr)
+        {
+            g_printerr("no rtspclientsink\n");
+            g_exit.store(true);
+            return;
+        }
+        ::g_object_set(G_OBJECT(out), "location", outUrl.c_str(), nullptr);
+        ::gst_util_set_object_arg(G_OBJECT(out), "protocols", "tcp");
+        ::gst_bin_add(GST_BIN(pipeline), out);
+        if (!::gst_element_link(outq, out)) failOutput("the sink did not link");
+        else if (::gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
+            failOutput("the pipeline did not start");
+    };
+    play();
 
     for (auto& w : workers)
     {
@@ -1169,10 +1210,11 @@ int main(int argc, char** argv)
     // Per-flow delivery metrics endpoint.
     std::thread statsHttp{stats_http_server, &workers, monitoring, statsPort};
 
-    // Block on bus until ERROR / EOS / SIGTERM.
-    auto* bus = ::gst_element_get_bus(pipeline);
+    // Block on bus until ERROR / EOS / SIGTERM, playing the output again
+    // when it is due.
     while (!g_exit.load(std::memory_order_relaxed))
     {
+        if (steady::now() >= retryAt) play();
         auto* msg = ::gst_bus_timed_pop_filtered(bus, 500 * GST_MSECOND,
             static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_WARNING));
         if (msg == nullptr) continue;
@@ -1184,9 +1226,13 @@ int main(int argc, char** argv)
                 gchar* dbg = nullptr;
                 ::gst_message_parse_error(msg, &err, &dbg);
                 g_printerr("BUS ERROR %s: %s\n", err ? err->message : "?", dbg ? dbg : "");
+                bool const fromOutput = out != nullptr && GST_MESSAGE_SRC(msg) != nullptr &&
+                    (GST_MESSAGE_SRC(msg) == GST_OBJECT(out) ||
+                     ::gst_object_has_as_ancestor(GST_MESSAGE_SRC(msg), GST_OBJECT(out)));
+                if (fromOutput) failOutput(err ? err->message : "?");
+                else g_exit.store(true);
                 if (err) ::g_error_free(err);
                 ::g_free(dbg);
-                g_exit.store(true);
                 break;
             }
             case GST_MESSAGE_EOS:
@@ -1223,6 +1269,7 @@ int main(int argc, char** argv)
     }
 
     ::gst_element_set_state(pipeline, GST_STATE_NULL);
+    if (outq) ::gst_object_unref(outq);
     ::gst_object_unref(pipeline);
 
     for (auto& w : workers)

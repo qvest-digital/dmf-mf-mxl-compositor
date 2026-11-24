@@ -69,7 +69,7 @@ RUN /root/vcpkg/vcpkg install picojson --x-install-root=/opt/vcpkg
 WORKDIR /src
 COPY CMakeLists.txt /src/
 COPY src /src/src/
-COPY tests/domain_test.cpp tests/connections_test.cpp tests/next_grain_test.cpp tests/flow_def_test.cpp tests/grain_rate_test.cpp tests/output_size_test.cpp tests/host_name_test.cpp tests/monitors_test.cpp /src/tests/
+COPY tests/domain_test.cpp tests/connections_test.cpp tests/next_grain_test.cpp tests/flow_def_test.cpp tests/grain_rate_test.cpp tests/output_size_test.cpp tests/output_retry_test.cpp tests/host_name_test.cpp tests/monitors_test.cpp /src/tests/
 COPY --from=nvnmos /opt/nvnmos /opt/nvnmos
 COPY --from=monitoring / /src/libmxl-monitoring/
 
