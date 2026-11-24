@@ -63,6 +63,14 @@ add_executable(grain_rate_test tests/grain_rate_test.cpp)
 target_include_directories(grain_rate_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME grain_rate_test COMMAND grain_rate_test)
 
+add_executable(output_size_test tests/output_size_test.cpp)
+target_include_directories(output_size_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME output_size_test COMMAND output_size_test)
+
+add_executable(output_retry_test tests/output_retry_test.cpp)
+target_include_directories(output_retry_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME output_retry_test COMMAND output_retry_test)
+
 add_executable(monitors_test tests/monitors_test.cpp)
 target_include_directories(monitors_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(monitors_test PRIVATE mxl-monitoring)

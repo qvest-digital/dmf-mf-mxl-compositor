@@ -17,8 +17,9 @@
 // directory named by the domain's id.
 //
 // Each flow runs a worker thread that drives a dedicated appsrc with v210
-// grains. The compositor element does the layout in I420 space; encoding
-// happens once at the output, not per-flow.
+// grains. The compositor element does the layout in I420 space; scaling to
+// MXL_OUTPUT_WIDTH x MXL_OUTPUT_HEIGHT, where set, and encoding happen once
+// at the output, not per-flow.
 
 #include <atomic>
 #include <chrono>
@@ -47,6 +48,8 @@
 #include "flow_def.hpp"
 #include "grain_rate.hpp"
 #include "next_grain.hpp"
+#include "output_retry.hpp"
+#include "output_size.hpp"
 #include "nmos/host_name.hpp"
 #include "nmos/node.hpp"
 #include "nmos/slots.hpp"
@@ -82,11 +85,15 @@ namespace
     // can report the RDMA-delivered throughput per tile.
     int g_cols = 1;
     int g_rows = 1;
-    // Output canvas, set in main() once the grid is known. Native tiles (no
-    // downscale) => g_outW/g_outH = grid * source frame size.
+    // Encoded size, set in main() once the grid is known: the canvas, grid
+    // times the source frame size, unless MXL_OUTPUT_WIDTH/HEIGHT name one.
     int g_outW = 1280;
     int g_outH = 720;
     std::int64_t g_grainBytes = 0;
+    // Whether the pipeline, and with it the RTSP output, plays, and how
+    // often the output failed and was tried again.
+    std::atomic<bool> g_outputUp{false};
+    std::atomic<std::uint64_t> g_outputRetries{0};
 
     void on_signal(int) { g_exit.store(true, std::memory_order_relaxed); }
 
@@ -248,6 +255,8 @@ namespace
                  << ",\"outW\":" << g_outW << ",\"outH\":" << g_outH
                  << ",\"cols\":" << g_cols << ",\"rows\":" << g_rows
                  << ",\"grainBytes\":" << g_grainBytes
+                 << ",\"outputUp\":" << (g_outputUp.load() ? "true" : "false")
+                 << ",\"outputRetries\":" << g_outputRetries.load()
                  << ",\"flows\":[";
             for (std::size_t i = 0; i < workers->size(); ++i)
             {
@@ -718,7 +727,9 @@ namespace
                 break;
             }
 
-            w->framesPushed.fetch_add(1, std::memory_order_relaxed);
+            // A frame refused while the output is down did not reach the
+            // mosaic.
+            if (pushRet == GST_FLOW_OK) w->framesPushed.fetch_add(1, std::memory_order_relaxed);
             pace();
         }
 
@@ -777,11 +788,9 @@ int main(int argc, char** argv)
     }
 
     // Square-ish grid sized to the flow count: cols = ceil(sqrt(n)),
-    // rows = ceil(n / cols). 1->1x1, 2->2x1, 4->2x2, 9->3x3. Output stays
-    // 1280x720; tiles are OUT/cols x OUT/rows so they tile it exactly when
-    // the dimensions divide (4 flows -> 2x2 of 640x360).
-    // Column count defaults to a near-square grid; MXL_GRID_COLS overrides it
-    // (MXL_GRID_COLS=1 stacks the tiles in a single vertical column).
+    // rows = ceil(n / cols). 1->1x1, 2->2x1, 4->2x2, 9->3x3. MXL_GRID_COLS
+    // overrides the column count (MXL_GRID_COLS=1 stacks the tiles in a single
+    // vertical column).
     {
         std::string const colsEnv = env_or("MXL_GRID_COLS", "");
         int const envCols = colsEnv.empty() ? 0 : std::atoi(colsEnv.c_str());
@@ -792,20 +801,38 @@ int main(int argc, char** argv)
     if (g_cols < 1) g_cols = 1;
     g_rows = static_cast<int>((flowIds.size() + g_cols - 1) / g_cols);
     if (g_rows < 1) g_rows = 1;
-    // No downscale: each tile is the full source frame, the canvas is the
-    // grid times the source size. High-detail patterns (circular, checkers,
-    // zone-plate) alias into solid-colour garbage when a 1080p tile is
-    // squeezed to a few hundred px + v210 chroma packing; at native res they
-    // render clean. Cost is a large output (e.g. 6x 1080p -> 5760x2160) -- the
-    // RDMA fabric carries it, but note an h264 decoder width cap of 4096 can
-    // stop browsers playing canvases wider than two 1080p columns.
+    // Each tile is the full source frame, the canvas is the grid times the
+    // source size. High-detail patterns (circular, checkers, zone-plate) alias
+    // into solid-colour garbage when a 1080p tile is squeezed to a few hundred
+    // px + v210 chroma packing; at native res they render clean. Cost is a
+    // large canvas (e.g. 6x 1080p -> 5760x2160), and an h264 decoder width cap
+    // of 4096 can stop browsers playing one wider than two 1080p columns.
+    //
+    // MXL_OUTPUT_WIDTH/HEIGHT scale the composed canvas once, after the
+    // compositor and before the encoder, so a viewer that cannot take the
+    // canvas gets the size it can without a second decode and encode
+    // downstream. Unset, the canvas is encoded as it is.
     int const TILE_W = g_frameW;
     int const TILE_H = g_frameH;
-    g_outW = g_cols * TILE_W;
-    g_outH = g_rows * TILE_H;
+    int const CANVAS_W = g_cols * TILE_W;
+    int const CANVAS_H = g_rows * TILE_H;
+    {
+        auto const widthText = env_or("MXL_OUTPUT_WIDTH", "");
+        auto const heightText = env_or("MXL_OUTPUT_HEIGHT", "");
+        auto const size = output_size::resolve(widthText, heightText, {CANVAS_W, CANVAS_H});
+        if (!size)
+        {
+            g_printerr("MXL_OUTPUT_WIDTH and MXL_OUTPUT_HEIGHT are not both unset or both a positive even "
+                       "number: \"%s\" x \"%s\"\n", widthText.c_str(), heightText.c_str());
+            return 2;
+        }
+        g_outW = size->width;
+        g_outH = size->height;
+    }
     int const OUT_W = g_outW;
     int const OUT_H = g_outH;
-    // Scale the encoder bitrate with the canvas area so a 4K+ mosaic isn't
+    bool const scaled = OUT_W != CANVAS_W || OUT_H != CANVAS_H;
+    // Scale the encoder bitrate with the encoded area so a 4K+ mosaic isn't
     // starved at the 720p-tuned 6 Mbps. Linear in pixels off the 1280x720
     // baseline; the fabric has the bandwidth.
     long long const baseline = 1280LL * 720LL;
@@ -824,8 +851,8 @@ int main(int argc, char** argv)
     int const capKbps = std::atoi(env_or("COMPOSITOR_MAX_BITRATE_KBPS", "0").c_str());
     if (capKbps > 0 && bitrateKbps > capKbps) bitrateKbps = capKbps;
     g_grainBytes = v210GrainBytes(g_frameW, g_frameH);
-    g_print("Grid: %zu flows -> %dx%d, tile %dx%d, out %dx%d, bitrate %dkbps, grainBytes %lld\n",
-        flowIds.size(), g_cols, g_rows, TILE_W, TILE_H, OUT_W, OUT_H, bitrateKbps,
+    g_print("Grid: %zu flows -> %dx%d, tile %dx%d, canvas %dx%d, out %dx%d, bitrate %dkbps, grainBytes %lld\n",
+        flowIds.size(), g_cols, g_rows, TILE_W, TILE_H, CANVAS_W, CANVAS_H, OUT_W, OUT_H, bitrateKbps,
         static_cast<long long>(g_grainBytes));
 
     // Two seconds of grains, rounded up.
@@ -856,12 +883,22 @@ int main(int argc, char** argv)
             "::height=" + std::to_string(TILE_H) + " ";
     }
     pipelineDesc +=
-        "! video/x-raw,format=I420,width=" + std::to_string(OUT_W) +
-        ",height=" + std::to_string(OUT_H) +
+        "! video/x-raw,format=I420,width=" + std::to_string(CANVAS_W) +
+        ",height=" + std::to_string(CANVAS_H) +
         ",framerate=" + std::to_string(g_rate.numerator) + "/" + std::to_string(g_rate.denominator) + " "
         // Drop-old leaky queue right after the compositor so a brief
         // encoder hiccup doesn't backpropagate to the readers.
-        "! queue leaky=downstream max-size-buffers=4 max-size-bytes=0 max-size-time=0 "
+        "! queue leaky=downstream max-size-buffers=4 max-size-bytes=0 max-size-time=0 ";
+    if (scaled)
+    {
+        // The compositor emits square pixels and these caps keep them, so a
+        // size of another aspect is letterboxed in black, not stretched.
+        pipelineDesc +=
+            "! videoscale add-borders=true "
+            "! video/x-raw,width=" + std::to_string(OUT_W) + ",height=" + std::to_string(OUT_H) +
+            ",pixel-aspect-ratio=1/1 ";
+    }
+    pipelineDesc +=
         "! videoconvert "
         // Quality knobs:
         //  - speed-preset=superfast: x264 already spreads the encode over
@@ -870,7 +907,8 @@ int main(int argc, char** argv)
         //    faster, which doubles with the rate. ultrafast would drop CABAC
         //    and deblocking.
         //  - bitrate: 6000 kbps at the 720p baseline, scaled linearly
-        //    with canvas area (bitrateKbps above).
+        //    with the encoded area and capped by COMPOSITOR_MAX_BITRATE_KBPS
+        //    (bitrateKbps above).
         //  - bframes=0: WebRTC cannot carry them. mediamtx accepts the
         //    stream, opens the peer connection, then closes it with
         //    "WebRTC doesn't support H264 streams with B-frames" and the
@@ -893,8 +931,8 @@ int main(int argc, char** argv)
         // Drop-old leaky queue right before the RTSP sink: if mediamtx
         // momentarily stalls accepting RTP, throw frames away rather
         // than queue them indefinitely.
-        "! queue leaky=downstream max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
-        "! rtspclientsink protocols=tcp location=\"" + outUrl + "\" ";
+        // The rtspclientsink after it is added for each try; see play below.
+        "! queue name=outq leaky=downstream max-size-buffers=8 max-size-bytes=0 max-size-time=0 ";
 
     for (std::size_t i = 0; i < flowIds.size(); ++i)
     {
@@ -1075,11 +1113,84 @@ int main(int argc, char** argv)
         }
     }
 
-    if (::gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
-    {
-        g_printerr("Failed to set pipeline PLAYING\n");
-        return 7;
-    }
+    // The RTSP server may not be up yet, or restart under a running mosaic.
+    // Either fails the output, and the whole pipeline is stopped and played
+    // again after a growing wait; the readers keep reading meanwhile, their
+    // pushes refused as flushing. Any other error ends the process. Each try
+    // gets a new rtspclientsink: one that lost its server mid-stream opens a
+    // session on the next and never publishes into it.
+    auto* const outq = ::gst_bin_get_by_name(GST_BIN(pipeline), "outq");
+    auto* bus = ::gst_element_get_bus(pipeline);
+    GstElement* out = nullptr;
+    // Whether this try's sink has sent its SETUP request, see the bus loop.
+    bool setUp = false;
+    output_retry::Backoff backoff{std::chrono::seconds(1), std::chrono::seconds(30), std::chrono::seconds(60)};
+    using steady = std::chrono::steady_clock;
+    auto playingSince = steady::now();
+    auto retryAt = steady::time_point::max();
+    auto fromOutput = [&](GstMessage* m) {
+        return out != nullptr && GST_MESSAGE_SRC(m) != nullptr &&
+            (GST_MESSAGE_SRC(m) == GST_OBJECT(out) || ::gst_object_has_as_ancestor(GST_MESSAGE_SRC(m), GST_OBJECT(out)));
+    };
+    auto failOutput = [&](char const* why) {
+        g_outputUp.store(false);
+        g_outputRetries.fetch_add(1);
+        ::gst_element_set_state(pipeline, GST_STATE_NULL);
+        if (out != nullptr) ::gst_bin_remove(GST_BIN(pipeline), out);
+        out = nullptr;
+        // What the stopped output posted is not news, and names an element
+        // that is gone.
+        ::gst_bus_set_flushing(bus, TRUE);
+        ::gst_bus_set_flushing(bus, FALSE);
+        auto const wait = backoff.next(std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - playingSince));
+        g_printerr("output %s failed: %s; trying again in %lld ms\n", outUrl.c_str(), why,
+            static_cast<long long>(wait.count()));
+        retryAt = steady::now() + wait;
+    };
+    auto play = [&]() {
+        setUp = false;
+        retryAt = steady::time_point::max();
+        playingSince = steady::now();
+        out = ::gst_element_factory_make("rtspclientsink", "out");
+        if (out == nullptr || outq == nullptr)
+        {
+            g_printerr("no rtspclientsink\n");
+            g_exit.store(true);
+            return;
+        }
+        ::g_object_set(G_OBJECT(out), "location", outUrl.c_str(), nullptr);
+        ::gst_util_set_object_arg(G_OBJECT(out), "protocols", "tcp");
+        ::gst_bin_add(GST_BIN(pipeline), out);
+        if (!::gst_element_link(outq, out))
+        {
+            failOutput("the sink did not link");
+            return;
+        }
+        if (::gst_element_set_state(pipeline, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE) return;
+        // A start that failed for the output is tried again; one that failed
+        // anywhere else, or said nothing, ends the process as any other
+        // pipeline error does.
+        bool output = false;
+        while (auto* m = ::gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR))
+        {
+            GError* err = nullptr;
+            gchar* dbg = nullptr;
+            ::gst_message_parse_error(m, &err, &dbg);
+            g_printerr("BUS ERROR %s: %s\n", err ? err->message : "?", dbg ? dbg : "");
+            if (fromOutput(m)) output = true;
+            else g_exit.store(true);
+            if (err) ::g_error_free(err);
+            ::g_free(dbg);
+            ::gst_message_unref(m);
+        }
+        if (output && !g_exit.load()) failOutput("the pipeline did not start");
+        else
+        {
+            g_printerr("the pipeline did not start, and not for its output; exiting\n");
+            g_exit.store(true);
+        }
+    };
+    play();
 
     for (auto& w : workers)
     {
@@ -1134,6 +1245,8 @@ int main(int argc, char** argv)
                     std::memory_order_relaxed);
                 line += " [" + std::to_string(i) + "]=" + std::to_string(delta) + "fps";
             }
+            line += std::string{" output="} + (g_outputUp.load() ? "up" : "down") +
+                " retries=" + std::to_string(g_outputRetries.load());
             g_print("%s\n", line.c_str());
         }
     }};
@@ -1141,12 +1254,14 @@ int main(int argc, char** argv)
     // Per-flow delivery metrics endpoint.
     std::thread statsHttp{stats_http_server, &workers, monitoring, statsPort};
 
-    // Block on bus until ERROR / EOS / SIGTERM.
-    auto* bus = ::gst_element_get_bus(pipeline);
+    // Block on bus until ERROR / EOS / SIGTERM, playing the output again
+    // when it is due.
     while (!g_exit.load(std::memory_order_relaxed))
     {
+        if (steady::now() >= retryAt) play();
         auto* msg = ::gst_bus_timed_pop_filtered(bus, 500 * GST_MSECOND,
-            static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_WARNING));
+            static_cast<GstMessageType>(
+                GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_WARNING | GST_MESSAGE_PROGRESS));
         if (msg == nullptr) continue;
         switch (GST_MESSAGE_TYPE(msg))
         {
@@ -1156,9 +1271,31 @@ int main(int argc, char** argv)
                 gchar* dbg = nullptr;
                 ::gst_message_parse_error(msg, &err, &dbg);
                 g_printerr("BUS ERROR %s: %s\n", err ? err->message : "?", dbg ? dbg : "");
+                if (fromOutput(msg)) failOutput(err ? err->message : "?");
+                else g_exit.store(true);
                 if (err) ::g_error_free(err);
                 ::g_free(dbg);
-                g_exit.store(true);
+                break;
+            }
+            case GST_MESSAGE_PROGRESS:
+            {
+                // The pipeline plays before the sink has its server. The sink
+                // reports "record" progress when it announces the stream and
+                // again when recording starts, the one after its SETUP
+                // request; that one is the output up.
+                GstProgressType type{};
+                gchar* code = nullptr;
+                gchar* text = nullptr;
+                ::gst_message_parse_progress(msg, &type, &code, &text);
+                if (fromOutput(msg) && code != nullptr)
+                {
+                    if (std::strcmp(code, "request") == 0 && text != nullptr && std::strncmp(text, "SETUP", 5) == 0)
+                        setUp = true;
+                    else if (std::strcmp(code, "record") == 0 && setUp && !g_outputUp.exchange(true))
+                        g_print("output %s up\n", outUrl.c_str());
+                }
+                ::g_free(code);
+                ::g_free(text);
                 break;
             }
             case GST_MESSAGE_EOS:
@@ -1195,6 +1332,7 @@ int main(int argc, char** argv)
     }
 
     ::gst_element_set_state(pipeline, GST_STATE_NULL);
+    if (outq) ::gst_object_unref(outq);
     ::gst_object_unref(pipeline);
 
     for (auto& w : workers)

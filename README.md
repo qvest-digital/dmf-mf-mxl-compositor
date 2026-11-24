@@ -18,9 +18,14 @@ One dedicated reader thread per flow reads one grain per period of
 shown grain by grain, its grains repeated where it is slower; a faster one is
 sampled at the head, so its grains drop evenly. A GStreamer `compositor`
 element lays the raw frames out at their native tile size and hands the
-composed frame to a single x264 encoder at `MXL_GRAIN_RATE`, with a 2 s GOP,
+composed frame, scaled once where `MXL_OUTPUT_WIDTH` and `MXL_OUTPUT_HEIGHT`
+name a size, to a single x264 encoder at `MXL_GRAIN_RATE`, with a 2 s GOP,
 so there is no per-flow decode pass. The encoded bitstream goes to
-`rtspclientsink`.
+`rtspclientsink`. An RTSP server that is not up yet, or one that goes away
+under a running mosaic, fails the output and nothing else: the pipeline is
+stopped and played again after 1 s, doubling to at most 30 s while it keeps
+failing and back to 1 s once the output ran for a minute, while the readers
+keep reading. Any other pipeline error exits.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -32,21 +37,32 @@ so there is no per-flow decode pass. The encoded bitstream goes to
 | `MXL_FRAME_HEIGHT` | `1080` | Tile height, must match the flow definition |
 | `MXL_GRAIN_RATE` | `50/1` | Rate of every tile, the output and the NMOS caps; `numerator/denominator` or whole |
 | `MXL_GRID_COLS` | derived | Column count override |
+| `MXL_OUTPUT_WIDTH` | canvas width | Encoded width; set with `MXL_OUTPUT_HEIGHT` or not at all |
+| `MXL_OUTPUT_HEIGHT` | canvas height | Encoded height; set with `MXL_OUTPUT_WIDTH` or not at all |
+| `COMPOSITOR_MAX_BITRATE_KBPS` | none | Upper bound on the encoder bitrate |
 | `MXL_STATS_PORT` | `9090` | Port for `/stats.json` and `/metrics` |
 | `MXL_TILES` | flow count | Tile count; tiles beyond `MXL_FLOW_IDS` start empty |
 
 No tiles -- neither `MXL_FLOW_IDS` nor `MXL_TILES` -- exits non-zero, as does
-an `MXL_GRAIN_RATE` that is not two positive integers. Opening a reader retries
+an `MXL_GRAIN_RATE` that is not two positive integers, or an output size that
+is only half set or not two positive even integers. Opening a reader retries
 indefinitely rather than exiting, once a second, so a flow that is not yet
 present does not turn into a crash loop.
 
 Grid geometry is computed once the flow count is known: `cols = ceil(sqrt(n))`,
-`rows = ceil(n / cols)`. The output canvas is `cols * MXL_FRAME_WIDTH` by
-`rows * MXL_FRAME_HEIGHT`; tiles are not downscaled.
+`rows = ceil(n / cols)`. The canvas is `cols * MXL_FRAME_WIDTH` by
+`rows * MXL_FRAME_HEIGHT`; tiles are composited at their native size. With an
+output size set, the composed canvas is scaled to it once before encoding, and
+a size of another aspect ratio is letterboxed in black rather than stretched.
+The encoder bitrate is 6000 kbps per 1280x720 of encoded area, at least 6000,
+and at most `COMPOSITOR_MAX_BITRATE_KBPS` where that is set.
 
 `GET /stats.json` on `MXL_STATS_PORT` returns per-flow `fps`, `pushed`,
-`missed`, `mbps` and `live`, plus `cols`, `rows`, `outW`, `outH` and
-`grainBytes`. It is CORS-open.
+`missed`, `mbps` and `live`, plus `cols`, `rows`, `outW`, `outH` (the
+encoded size), `grainBytes`, `outputUp` (the pipeline plays, so the RTSP
+output has its server) and `outputRetries` (how often the output failed). A
+frame counts as pushed once the pipeline took it, so a tile reads `0` fps
+while the output is down. It is CORS-open.
 
 `GET /metrics` on the same port returns every tile's counts as Prometheus
 text, from [libmxl-monitoring](https://github.com/marquies/libmxl-monitoring):
