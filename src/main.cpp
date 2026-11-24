@@ -17,8 +17,9 @@
 // directory named by the domain's id.
 //
 // Each flow runs a worker thread that drives a dedicated appsrc with v210
-// grains. The compositor element does the layout in I420 space; encoding
-// happens once at the output, not per-flow.
+// grains. The compositor element does the layout in I420 space; scaling to
+// MXL_OUTPUT_WIDTH x MXL_OUTPUT_HEIGHT, where set, and encoding happen once
+// at the output, not per-flow.
 
 #include <atomic>
 #include <chrono>
@@ -47,6 +48,7 @@
 #include "flow_def.hpp"
 #include "grain_rate.hpp"
 #include "next_grain.hpp"
+#include "output_size.hpp"
 #include "nmos/host_name.hpp"
 #include "nmos/node.hpp"
 #include "nmos/slots.hpp"
@@ -82,8 +84,8 @@ namespace
     // can report the RDMA-delivered throughput per tile.
     int g_cols = 1;
     int g_rows = 1;
-    // Output canvas, set in main() once the grid is known. Native tiles (no
-    // downscale) => g_outW/g_outH = grid * source frame size.
+    // Encoded size, set in main() once the grid is known: the canvas, grid
+    // times the source frame size, unless MXL_OUTPUT_WIDTH/HEIGHT name one.
     int g_outW = 1280;
     int g_outH = 720;
     std::int64_t g_grainBytes = 0;
@@ -777,11 +779,9 @@ int main(int argc, char** argv)
     }
 
     // Square-ish grid sized to the flow count: cols = ceil(sqrt(n)),
-    // rows = ceil(n / cols). 1->1x1, 2->2x1, 4->2x2, 9->3x3. Output stays
-    // 1280x720; tiles are OUT/cols x OUT/rows so they tile it exactly when
-    // the dimensions divide (4 flows -> 2x2 of 640x360).
-    // Column count defaults to a near-square grid; MXL_GRID_COLS overrides it
-    // (MXL_GRID_COLS=1 stacks the tiles in a single vertical column).
+    // rows = ceil(n / cols). 1->1x1, 2->2x1, 4->2x2, 9->3x3. MXL_GRID_COLS
+    // overrides the column count (MXL_GRID_COLS=1 stacks the tiles in a single
+    // vertical column).
     {
         std::string const colsEnv = env_or("MXL_GRID_COLS", "");
         int const envCols = colsEnv.empty() ? 0 : std::atoi(colsEnv.c_str());
@@ -792,20 +792,38 @@ int main(int argc, char** argv)
     if (g_cols < 1) g_cols = 1;
     g_rows = static_cast<int>((flowIds.size() + g_cols - 1) / g_cols);
     if (g_rows < 1) g_rows = 1;
-    // No downscale: each tile is the full source frame, the canvas is the
-    // grid times the source size. High-detail patterns (circular, checkers,
-    // zone-plate) alias into solid-colour garbage when a 1080p tile is
-    // squeezed to a few hundred px + v210 chroma packing; at native res they
-    // render clean. Cost is a large output (e.g. 6x 1080p -> 5760x2160) -- the
-    // RDMA fabric carries it, but note an h264 decoder width cap of 4096 can
-    // stop browsers playing canvases wider than two 1080p columns.
+    // Each tile is the full source frame, the canvas is the grid times the
+    // source size. High-detail patterns (circular, checkers, zone-plate) alias
+    // into solid-colour garbage when a 1080p tile is squeezed to a few hundred
+    // px + v210 chroma packing; at native res they render clean. Cost is a
+    // large canvas (e.g. 6x 1080p -> 5760x2160), and an h264 decoder width cap
+    // of 4096 can stop browsers playing one wider than two 1080p columns.
+    //
+    // MXL_OUTPUT_WIDTH/HEIGHT scale the composed canvas once, after the
+    // compositor and before the encoder, so a viewer that cannot take the
+    // canvas gets the size it can without a second decode and encode
+    // downstream. Unset, the canvas is encoded as it is.
     int const TILE_W = g_frameW;
     int const TILE_H = g_frameH;
-    g_outW = g_cols * TILE_W;
-    g_outH = g_rows * TILE_H;
+    int const CANVAS_W = g_cols * TILE_W;
+    int const CANVAS_H = g_rows * TILE_H;
+    {
+        auto const widthText = env_or("MXL_OUTPUT_WIDTH", "");
+        auto const heightText = env_or("MXL_OUTPUT_HEIGHT", "");
+        auto const size = output_size::resolve(widthText, heightText, {CANVAS_W, CANVAS_H});
+        if (!size)
+        {
+            g_printerr("MXL_OUTPUT_WIDTH and MXL_OUTPUT_HEIGHT are not both unset or both a positive even "
+                       "number: \"%s\" x \"%s\"\n", widthText.c_str(), heightText.c_str());
+            return 2;
+        }
+        g_outW = size->width;
+        g_outH = size->height;
+    }
     int const OUT_W = g_outW;
     int const OUT_H = g_outH;
-    // Scale the encoder bitrate with the canvas area so a 4K+ mosaic isn't
+    bool const scaled = OUT_W != CANVAS_W || OUT_H != CANVAS_H;
+    // Scale the encoder bitrate with the encoded area so a 4K+ mosaic isn't
     // starved at the 720p-tuned 6 Mbps. Linear in pixels off the 1280x720
     // baseline; the fabric has the bandwidth.
     long long const baseline = 1280LL * 720LL;
@@ -824,8 +842,8 @@ int main(int argc, char** argv)
     int const capKbps = std::atoi(env_or("COMPOSITOR_MAX_BITRATE_KBPS", "0").c_str());
     if (capKbps > 0 && bitrateKbps > capKbps) bitrateKbps = capKbps;
     g_grainBytes = v210GrainBytes(g_frameW, g_frameH);
-    g_print("Grid: %zu flows -> %dx%d, tile %dx%d, out %dx%d, bitrate %dkbps, grainBytes %lld\n",
-        flowIds.size(), g_cols, g_rows, TILE_W, TILE_H, OUT_W, OUT_H, bitrateKbps,
+    g_print("Grid: %zu flows -> %dx%d, tile %dx%d, canvas %dx%d, out %dx%d, bitrate %dkbps, grainBytes %lld\n",
+        flowIds.size(), g_cols, g_rows, TILE_W, TILE_H, CANVAS_W, CANVAS_H, OUT_W, OUT_H, bitrateKbps,
         static_cast<long long>(g_grainBytes));
 
     // Two seconds of grains, rounded up.
@@ -856,12 +874,22 @@ int main(int argc, char** argv)
             "::height=" + std::to_string(TILE_H) + " ";
     }
     pipelineDesc +=
-        "! video/x-raw,format=I420,width=" + std::to_string(OUT_W) +
-        ",height=" + std::to_string(OUT_H) +
+        "! video/x-raw,format=I420,width=" + std::to_string(CANVAS_W) +
+        ",height=" + std::to_string(CANVAS_H) +
         ",framerate=" + std::to_string(g_rate.numerator) + "/" + std::to_string(g_rate.denominator) + " "
         // Drop-old leaky queue right after the compositor so a brief
         // encoder hiccup doesn't backpropagate to the readers.
-        "! queue leaky=downstream max-size-buffers=4 max-size-bytes=0 max-size-time=0 "
+        "! queue leaky=downstream max-size-buffers=4 max-size-bytes=0 max-size-time=0 ";
+    if (scaled)
+    {
+        // The compositor emits square pixels and these caps keep them, so a
+        // size of another aspect is letterboxed in black, not stretched.
+        pipelineDesc +=
+            "! videoscale add-borders=true "
+            "! video/x-raw,width=" + std::to_string(OUT_W) + ",height=" + std::to_string(OUT_H) +
+            ",pixel-aspect-ratio=1/1 ";
+    }
+    pipelineDesc +=
         "! videoconvert "
         // Quality knobs:
         //  - speed-preset=superfast: x264 already spreads the encode over
