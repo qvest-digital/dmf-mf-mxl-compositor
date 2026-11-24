@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.27](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.26...v1.0.0-rc.27) (2026-11-24)
+
+
+### Features
+
+* scale the composite to MXL_OUTPUT_WIDTH x MXL_OUTPUT_HEIGHT ([a1b950c](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/a1b950c61b359a89c2926be071a23df4d2a5227d))
+
+
+### Bug Fixes
+
+* play the RTSP output again after its server goes away ([a1b950c](https://github.com/qvest-digital/dmf-mf-mxl-compositor/commit/a1b950c61b359a89c2926be071a23df4d2a5227d))
+
 ## [1.0.0-rc.26](https://github.com/qvest-digital/dmf-mf-mxl-compositor/compare/v1.0.0-rc.25...v1.0.0-rc.26) (2026-11-23)
 
 
