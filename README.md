@@ -59,7 +59,10 @@ and at most `COMPOSITOR_MAX_BITRATE_KBPS` where that is set.
 
 `GET /stats.json` on `MXL_STATS_PORT` returns per-flow `fps`, `pushed`,
 `missed`, `mbps` and `live`, plus `cols`, `rows`, `outW`, `outH` (the
-encoded size) and `grainBytes`. It is CORS-open.
+encoded size), `grainBytes`, `outputUp` (the pipeline plays, so the RTSP
+output has its server) and `outputRetries` (how often the output failed). A
+frame counts as pushed once the pipeline took it, so a tile reads `0` fps
+while the output is down. It is CORS-open.
 
 `GET /metrics` on the same port returns every tile's counts as Prometheus
 text, from [libmxl-monitoring](https://github.com/marquies/libmxl-monitoring):

@@ -90,6 +90,10 @@ namespace
     int g_outW = 1280;
     int g_outH = 720;
     std::int64_t g_grainBytes = 0;
+    // Whether the pipeline, and with it the RTSP output, plays, and how
+    // often the output failed and was tried again.
+    std::atomic<bool> g_outputUp{false};
+    std::atomic<std::uint64_t> g_outputRetries{0};
 
     void on_signal(int) { g_exit.store(true, std::memory_order_relaxed); }
 
@@ -251,6 +255,8 @@ namespace
                  << ",\"outW\":" << g_outW << ",\"outH\":" << g_outH
                  << ",\"cols\":" << g_cols << ",\"rows\":" << g_rows
                  << ",\"grainBytes\":" << g_grainBytes
+                 << ",\"outputUp\":" << (g_outputUp.load() ? "true" : "false")
+                 << ",\"outputRetries\":" << g_outputRetries.load()
                  << ",\"flows\":[";
             for (std::size_t i = 0; i < workers->size(); ++i)
             {
@@ -721,7 +727,9 @@ namespace
                 break;
             }
 
-            w->framesPushed.fetch_add(1, std::memory_order_relaxed);
+            // A frame refused while the output is down did not reach the
+            // mosaic.
+            if (pushRet == GST_FLOW_OK) w->framesPushed.fetch_add(1, std::memory_order_relaxed);
             pace();
         }
 
@@ -1114,11 +1122,19 @@ int main(int argc, char** argv)
     auto* const outq = ::gst_bin_get_by_name(GST_BIN(pipeline), "outq");
     auto* bus = ::gst_element_get_bus(pipeline);
     GstElement* out = nullptr;
+    // Whether this try's sink has sent its SETUP request, see the bus loop.
+    bool setUp = false;
     output_retry::Backoff backoff{std::chrono::seconds(1), std::chrono::seconds(30), std::chrono::seconds(60)};
     using steady = std::chrono::steady_clock;
     auto playingSince = steady::now();
     auto retryAt = steady::time_point::max();
+    auto fromOutput = [&](GstMessage* m) {
+        return out != nullptr && GST_MESSAGE_SRC(m) != nullptr &&
+            (GST_MESSAGE_SRC(m) == GST_OBJECT(out) || ::gst_object_has_as_ancestor(GST_MESSAGE_SRC(m), GST_OBJECT(out)));
+    };
     auto failOutput = [&](char const* why) {
+        g_outputUp.store(false);
+        g_outputRetries.fetch_add(1);
         ::gst_element_set_state(pipeline, GST_STATE_NULL);
         if (out != nullptr) ::gst_bin_remove(GST_BIN(pipeline), out);
         out = nullptr;
@@ -1132,6 +1148,7 @@ int main(int argc, char** argv)
         retryAt = steady::now() + wait;
     };
     auto play = [&]() {
+        setUp = false;
         retryAt = steady::time_point::max();
         playingSince = steady::now();
         out = ::gst_element_factory_make("rtspclientsink", "out");
@@ -1144,9 +1161,34 @@ int main(int argc, char** argv)
         ::g_object_set(G_OBJECT(out), "location", outUrl.c_str(), nullptr);
         ::gst_util_set_object_arg(G_OBJECT(out), "protocols", "tcp");
         ::gst_bin_add(GST_BIN(pipeline), out);
-        if (!::gst_element_link(outq, out)) failOutput("the sink did not link");
-        else if (::gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
-            failOutput("the pipeline did not start");
+        if (!::gst_element_link(outq, out))
+        {
+            failOutput("the sink did not link");
+            return;
+        }
+        if (::gst_element_set_state(pipeline, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE) return;
+        // A start that failed for the output is tried again; one that failed
+        // anywhere else, or said nothing, ends the process as any other
+        // pipeline error does.
+        bool output = false;
+        while (auto* m = ::gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR))
+        {
+            GError* err = nullptr;
+            gchar* dbg = nullptr;
+            ::gst_message_parse_error(m, &err, &dbg);
+            g_printerr("BUS ERROR %s: %s\n", err ? err->message : "?", dbg ? dbg : "");
+            if (fromOutput(m)) output = true;
+            else g_exit.store(true);
+            if (err) ::g_error_free(err);
+            ::g_free(dbg);
+            ::gst_message_unref(m);
+        }
+        if (output && !g_exit.load()) failOutput("the pipeline did not start");
+        else
+        {
+            g_printerr("the pipeline did not start, and not for its output; exiting\n");
+            g_exit.store(true);
+        }
     };
     play();
 
@@ -1203,6 +1245,8 @@ int main(int argc, char** argv)
                     std::memory_order_relaxed);
                 line += " [" + std::to_string(i) + "]=" + std::to_string(delta) + "fps";
             }
+            line += std::string{" output="} + (g_outputUp.load() ? "up" : "down") +
+                " retries=" + std::to_string(g_outputRetries.load());
             g_print("%s\n", line.c_str());
         }
     }};
@@ -1216,7 +1260,8 @@ int main(int argc, char** argv)
     {
         if (steady::now() >= retryAt) play();
         auto* msg = ::gst_bus_timed_pop_filtered(bus, 500 * GST_MSECOND,
-            static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_WARNING));
+            static_cast<GstMessageType>(
+                GST_MESSAGE_ERROR | GST_MESSAGE_EOS | GST_MESSAGE_WARNING | GST_MESSAGE_PROGRESS));
         if (msg == nullptr) continue;
         switch (GST_MESSAGE_TYPE(msg))
         {
@@ -1226,13 +1271,31 @@ int main(int argc, char** argv)
                 gchar* dbg = nullptr;
                 ::gst_message_parse_error(msg, &err, &dbg);
                 g_printerr("BUS ERROR %s: %s\n", err ? err->message : "?", dbg ? dbg : "");
-                bool const fromOutput = out != nullptr && GST_MESSAGE_SRC(msg) != nullptr &&
-                    (GST_MESSAGE_SRC(msg) == GST_OBJECT(out) ||
-                     ::gst_object_has_as_ancestor(GST_MESSAGE_SRC(msg), GST_OBJECT(out)));
-                if (fromOutput) failOutput(err ? err->message : "?");
+                if (fromOutput(msg)) failOutput(err ? err->message : "?");
                 else g_exit.store(true);
                 if (err) ::g_error_free(err);
                 ::g_free(dbg);
+                break;
+            }
+            case GST_MESSAGE_PROGRESS:
+            {
+                // The pipeline plays before the sink has its server. The sink
+                // reports "record" progress when it announces the stream and
+                // again when recording starts, the one after its SETUP
+                // request; that one is the output up.
+                GstProgressType type{};
+                gchar* code = nullptr;
+                gchar* text = nullptr;
+                ::gst_message_parse_progress(msg, &type, &code, &text);
+                if (fromOutput(msg) && code != nullptr)
+                {
+                    if (std::strcmp(code, "request") == 0 && text != nullptr && std::strncmp(text, "SETUP", 5) == 0)
+                        setUp = true;
+                    else if (std::strcmp(code, "record") == 0 && setUp && !g_outputUp.exchange(true))
+                        g_print("output %s up\n", outUrl.c_str());
+                }
+                ::g_free(code);
+                ::g_free(text);
                 break;
             }
             case GST_MESSAGE_EOS:
